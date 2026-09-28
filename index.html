@@ -10,6 +10,8 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="SteuerFinn">
   <meta name="format-detection" content="telephone=no">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="referrer" content="no-referrer">
   <title>SteuerFinn</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -49,9 +51,10 @@
 
   <div id="sheet" class="sheet" aria-hidden="true"></div>
   <div id="viewer" class="viewer" hidden></div>
+  <div id="lock" class="lock" hidden></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <input type="file" id="restoreInput" accept="application/json,.json" hidden>
 
+  <script src="scanner.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

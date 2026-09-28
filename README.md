@@ -8,7 +8,11 @@ Alle Daten bleiben lokal auf dem Gerät (IndexedDB). Es gibt keinen Server und k
   - *Arbeitsstätte*: Entfernungspauschale (einfache Strecke, 2026: 0,38 €/km ab km 1), max. 1× pro Tag
   - *Auswärts* (z. B. Berufsschule): Reisekosten 0,30 €/km, Hin- und Rückweg
 - **Kalender**: Wochenplan mit einem Tipp eintragen, einzelne Tage ändern, Zeiträume setzen (Blockschule, Urlaub, krank)
-- **Belege**: Ausgaben/Einnahmen mit Foto oder PDF, beruflicher Anteil in %
+- **Belege**: Ausgaben/Einnahmen, beruflicher Anteil in %
+- **Scanner**: Ecken automatisch erkennen, Perspektive entzerren, Filter Farbe/S-W, mehrseitig als PDF,
+  Texterkennung (Tesseract.js, läuft lokal) füllt Betrag, Datum und Händler vor
+- **PIN-Sperre**: Daten und Belege AES-256-GCM verschlüsselt (Schlüssel per PBKDF2 aus 6-stelliger PIN),
+  automatisches Sperren im Hintergrund, verschlüsseltes Backup
 - **Übersicht** je Steuerjahr: Werbungskosten (Anlage N) und EÜR fürs Gewerbe
 - **Export**: CSV (Fahrten, Belege), Belegfotos, JSON-Backup inkl. Fotos
 
