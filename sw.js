@@ -1,12 +1,13 @@
 // Service Worker: macht die App offline nutzbar.
 // Online wird immer frisch geladen; VERSION nur hochzählen, wenn SHELL-Dateien dazukommen/wegfallen.
-const VERSION = 'sf-v2';
+const VERSION = 'sf-v3';
 const SHELL = [
   './',
   'index.html',
   'style.css',
   'app.js',
   'scanner.js',
+  'report.js',
   'manifest.webmanifest',
   'icons/apple-touch-icon.png',
   'icons/icon-192.png',

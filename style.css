@@ -440,6 +440,37 @@ button { cursor: pointer; }
 .empty { text-align: center; padding: 22px 10px 8px; }
 .empty .big { font: 700 22px var(--f-display); margin: 0 0 6px; }
 
+/* ---------- Suche, Hinweise, Export ---------- */
+.search { position: relative; margin-top: 12px; }
+.search svg { position: absolute; left: 12px; top: 50%; width: 20px; height: 20px; transform: translateY(-50%); fill: none; stroke: var(--ink-3); stroke-width: 2; stroke-linecap: round; }
+.search input {
+  width: 100%; min-height: 46px; font-size: 16px;
+  padding: 10px 12px 10px 40px;
+  border: 1.5px solid var(--line); border-radius: 12px; background: var(--field);
+  -webkit-appearance: none; appearance: none;
+}
+.search input:focus { outline: none; border-color: var(--accent); }
+.nr { font: 600 11px var(--f-mono); color: var(--ink-2); }
+.nophoto {
+  flex: none; width: 20px; height: 20px; border-radius: 50%;
+  display: grid; place-items: center;
+  font: 700 12px var(--f-mono); color: #fff; background: var(--red);
+}
+.afa-box {
+  margin-top: 12px; padding: 12px;
+  border: 2px solid var(--gew); border-radius: 12px;
+  background: color-mix(in srgb, var(--gew) 8%, var(--card));
+}
+.afa-box > b { color: var(--gew); }
+.afa-box p { margin: 4px 0 0; font-size: 14px; }
+.warn-card { border: 2px solid var(--red); }
+.warn-card .eyebrow { color: var(--red); }
+.warn-list { margin: 6px 0 0; padding-left: 18px; font-size: 14px; }
+.warn-list li + li { margin-top: 6px; }
+.warn-list b { font-family: var(--f-mono); font-size: 12px; margin-right: 4px; }
+.export-card { border: 2px solid var(--accent); }
+.export-card .btn.block { min-height: 54px; font-size: 17px; margin-top: 6px; }
+
 /* ---------- Tabs ---------- */
 .tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
@@ -517,7 +548,8 @@ button { cursor: pointer; }
 .scan-link.strong { color: #0b0a08; background: #4fe3a0; border-radius: 12px; font-weight: 700; padding: 8px 16px; }
 .scan-stage { flex: 1; position: relative; min-height: 0; display: grid; place-items: center; padding: 8px; }
 .scan-stage canvas { position: absolute; inset: 0; touch-action: none; }
-.scan-stage img { max-width: 100%; max-height: 100%; border-radius: 4px; box-shadow: 0 10px 40px rgba(0, 0, 0, .6); }
+.scan-stage { overflow: hidden; }
+.scan-stage img { position: absolute; inset: 8px; width: calc(100% - 16px); height: calc(100% - 16px); object-fit: contain; transition: opacity .15s; }
 .scan-tip { text-align: center; color: #b9c2bc; font-size: 14px; margin: 4px 16px; }
 .scan-tools {
   display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
@@ -531,7 +563,7 @@ button { cursor: pointer; }
 }
 .scan-tools > button span { font-size: 20px; line-height: 1; }
 .scan-seg { display: flex; background: #24221d; border-radius: 14px; padding: 4px; gap: 4px; }
-.scan-seg button { background: none; border: 0; color: #d9e0dc; font-weight: 600; font-size: 15px; padding: 12px 14px; border-radius: 10px; min-height: 48px; }
+.scan-seg button { background: none; border: 0; color: #d9e0dc; font-weight: 600; font-size: 15px; padding: 12px 11px; border-radius: 10px; min-height: 48px; }
 .scan-seg button[aria-pressed="true"] { background: #4fe3a0; color: #0b0a08; }
 .scan-pages { flex: 1; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px; align-content: start; }
 .scan-pages figure { margin: 0; }

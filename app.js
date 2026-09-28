@@ -22,7 +22,7 @@ const parseKm = (v) => { const n = parseFloat(String(v).trim().replace(',', '.')
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const round2 = (n) => Math.round(n * 100) / 100;
 const kmText = (km) => dec(km, km % 1 ? 1 : 0);
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const deDate = (ds) => ds.split('-').reverse().join('.');
 
 const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
 const WD = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
@@ -32,12 +32,18 @@ const WD_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const PALETTE = ['#1d5fa6', '#b04e06', '#0f7a4a', '#b0226b', '#6a3fb5', '#0b7285', '#7d6400', '#c62828'];
 const BEREICH = { ausbildung: 'Ausbildung', gewerbe: 'Gewerbe' };
 const STATUS = { urlaub: 'Urlaub', krank: 'Krank', frei: 'Frei' };
-const AUSGABE_KAT = ['Arbeitsmittel', 'Fachliteratur', 'Arbeitskleidung', 'Software / Abos', 'Telefon / Internet', 'Büromaterial', 'Fortbildung / Kurse', 'Porto / Versand', 'Wareneinkauf', 'Werbung', 'Gebühren / Versicherung', 'Reisekosten (sonstige)', 'Sonstiges'];
+const ZAHLUNG = { karte: 'Karte', bar: 'Bar', ueberweisung: 'Überweisung', paypal: 'PayPal', sonstig: 'Sonstige' };
+const AUSGABE_KAT = ['Arbeitsmittel', 'Fachliteratur', 'Arbeitskleidung', 'Software / Abos', 'Telefon / Internet', 'Büromaterial', 'Fortbildung / Kurse', 'Porto / Versand', 'Wareneinkauf', 'Fremdleistungen', 'Werbung', 'Steuerberatung / Buchführung', 'Gebühren / Versicherung', 'Reisekosten (sonstige)', 'Sonstiges'];
 const EINNAHME_KAT = ['Umsatz / Verkauf', 'Honorar / Dienstleistung', 'Sonstige Einnahme'];
+const LAENDER = {
+  '': 'nur bundesweite', BW: 'Baden-Württemberg', BY: 'Bayern', BE: 'Berlin', BB: 'Brandenburg', HB: 'Bremen', HH: 'Hamburg',
+  HE: 'Hessen', MV: 'Mecklenburg-Vorpommern', NI: 'Niedersachsen', NW: 'Nordrhein-Westfalen', RP: 'Rheinland-Pfalz',
+  SL: 'Saarland', SN: 'Sachsen', ST: 'Sachsen-Anhalt', SH: 'Schleswig-Holstein', TH: 'Thüringen',
+};
 
 // ================= Steuerlogik =================
-// Dienstreise / auswärtige Tätigkeit: 0,30 € je gefahrenem km (Hin- und Rückfahrt).
-const REISE_RATE = 0.30;
+const REISE_RATE = 0.30;       // Auswärtstätigkeit: je gefahrenem km (hin + zurück)
+const VERPFLEGUNG = 14;        // Abwesenheit > 8 Std.
 
 // Entfernungspauschale je Arbeitstag (nur einfache Strecke).
 function pendelBetrag(km, year) {
@@ -51,14 +57,15 @@ function pendelSatzText(year) {
   if (year === 2021) return '0,30 €/km (bis 20 km), 0,35 € ab km 21';
   return '0,30 €/km';
 }
+const artText = (art) => ({ pendel: 'Entfernungspauschale', reise: 'Reisekosten 0,30 €/km', verpfl: 'Verpflegung > 8 Std.' }[art]);
 
-// Berechnet die absetzbaren Fahrtkosten eines Tages.
-// Entfernungspauschale zählt nur einmal pro Tag (höchster Wert), Reisekosten zusätzlich.
+// Absetzbare Fahrtkosten eines Tages.
+// Entfernungspauschale nur einmal pro Tag (höchster Wert), Reisekosten zusätzlich, Verpflegung max. 1× pro Tag.
 function dayCalc(rec) {
   if (!rec || rec.status) return [];
   const year = +rec.date.slice(0, 4);
   const out = [];
-  let best = null;
+  let best = null, verpfl = null;
   const dropped = [];
   for (const pid of rec.placeIds || []) {
     const p = placeById(pid);
@@ -68,14 +75,66 @@ function dayCalc(rec) {
       if (!best || item.betrag > best.betrag) { if (best) dropped.push(best); best = item; } else dropped.push(item);
     } else {
       out.push({ p, art: 'reise', km: p.km * 2, betrag: round2(p.km * 2 * REISE_RATE) });
+      if (p.verpflegung && !verpfl) verpfl = { p, art: 'verpfl', km: 0, betrag: VERPFLEGUNG };
     }
   }
   if (best) out.unshift(best);
+  if (verpfl) out.push(verpfl);
   out.dropped = dropped;
   return out;
 }
 
-// Bundesweite Feiertage (landesspezifische bitte selbst als "Frei" markieren)
+// ---------- Belege: Umsatzsteuer, Abschreibung, Zuordnung ----------
+const kleinU = () => S.cfg.kleinunternehmer !== false;
+const share = (e) => (e.anteil ?? 100) / 100;
+// Netto bei Regelbesteuerung im Gewerbe, sonst brutto
+const netto = (e) => (e.bereich === 'gewerbe' && !kleinU() && e.ust ? round2(e.amount / (1 + e.ust / 100)) : e.amount);
+const vstOf = (e) => (e.type === 'ausgabe' ? round2((e.amount - netto(e)) * share(e)) : 0);
+const anschaffung = (e) => netto(e);
+// Arbeitnehmer: 952 € brutto (= 800 € netto), Gewerbe: 800 € (netto bzw. brutto bei Kleinunternehmer)
+const afaLimit = (e) => (e.bereich === 'ausbildung' ? 952 : 800);
+const afaNeeded = (e) => e.type === 'ausgabe' && e.kategorie === 'Arbeitsmittel' && !e.edv && anschaffung(e) > afaLimit(e);
+
+// Absetzbarer Betrag im Jahr y (bei AfA monatsgenau verteilt)
+function yearAmount(e, y) {
+  if (e.type !== 'ausgabe') return 0;
+  const base = anschaffung(e) * share(e);
+  const y0 = +e.date.slice(0, 4);
+  if (!afaNeeded(e)) return y === y0 ? round2(base) : 0;
+  const total = Math.max(1, e.nd || 3) * 12;
+  const first = 13 - +e.date.slice(5, 7); // Monate im Kaufjahr inkl. Kaufmonat
+  if (y < y0) return 0;
+  const before = y === y0 ? 0 : first + (y - y0 - 1) * 12;
+  const months = Math.min(y === y0 ? first : 12, total - before);
+  return months > 0 ? round2(base * months / total) : 0;
+}
+const ansatz = (e, y) => (e.type === 'ausgabe' ? yearAmount(e, y) : (e.date.startsWith(y + '-') ? netto(e) : 0));
+
+function nPosten(e) { // Anlage N
+  if (afaNeeded(e)) return 'Arbeitsmittel (Abschreibung)';
+  return ({
+    Arbeitsmittel: 'Arbeitsmittel', Fachliteratur: 'Arbeitsmittel', Arbeitskleidung: 'Arbeitsmittel (typische Berufskleidung)',
+    'Fortbildung / Kurse': 'Fortbildungskosten', 'Reisekosten (sonstige)': 'Reisenebenkosten',
+    'Telefon / Internet': 'Telefon/Internet (beruflicher Anteil)',
+  })[e.kategorie] || 'Weitere Werbungskosten';
+}
+function euerPosten(e) { // Anlage EÜR (sinngemäß)
+  if (e.type === 'einnahme') return kleinU() ? 'Betriebseinnahmen als Kleinunternehmer' : 'Umsatzsteuerpflichtige Betriebseinnahmen';
+  if (e.kategorie === 'Arbeitsmittel') {
+    if (e.edv && anschaffung(e) > 800) return 'AfA Computer/Software (1 Jahr Nutzungsdauer)';
+    if (afaNeeded(e)) return 'Absetzung für Abnutzung (AfA)';
+    if (anschaffung(e) > 250) return 'Geringwertige Wirtschaftsgüter (GWG)';
+    return 'Übrige Betriebsausgaben';
+  }
+  return ({
+    Wareneinkauf: 'Waren, Roh- und Hilfsstoffe', Fremdleistungen: 'Bezogene Fremdleistungen',
+    'Telefon / Internet': 'Telekommunikation', 'Fortbildung / Kurse': 'Fortbildungskosten', Werbung: 'Werbekosten',
+    'Steuerberatung / Buchführung': 'Rechts- und Steuerberatung, Buchführung', 'Gebühren / Versicherung': 'Beiträge, Gebühren, Versicherungen',
+    'Reisekosten (sonstige)': 'Übernachtungs- und Reisenebenkosten',
+  })[e.kategorie] || 'Übrige Betriebsausgaben';
+}
+
+// ---------- Feiertage ----------
 function easter(y) {
   const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4;
   const f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
@@ -85,7 +144,9 @@ function easter(y) {
 }
 const holCache = new Map();
 function holidays(y) {
-  if (holCache.has(y)) return holCache.get(y);
+  const land = S.cfg.bundesland || '';
+  const key = y + land;
+  if (holCache.has(key)) return holCache.get(key);
   const e = easter(y);
   const rel = (n) => { const d = new Date(e); d.setDate(d.getDate() + n); return iso(d); };
   const map = new Map([
@@ -93,7 +154,17 @@ function holidays(y) {
     [rel(39), 'Christi Himmelfahrt'], [rel(50), 'Pfingstmontag'], [`${y}-10-03`, 'Tag der Deutschen Einheit'],
     [`${y}-12-25`, '1. Weihnachtstag'], [`${y}-12-26`, '2. Weihnachtstag'],
   ]);
-  holCache.set(y, map);
+  const add = (lands, date, name) => { if (lands.includes(land)) map.set(date, name); };
+  const bussUndBettag = (() => { const d = new Date(y, 10, 22); while (d.getDay() !== 3) d.setDate(d.getDate() - 1); return iso(d); })();
+  add(['BW', 'BY', 'ST'], `${y}-01-06`, 'Heilige Drei Könige');
+  add(['BE', 'MV'], `${y}-03-08`, 'Internationaler Frauentag');
+  add(['BW', 'BY', 'HE', 'NW', 'RP', 'SL'], rel(60), 'Fronleichnam');
+  add(['SL', 'BY'], `${y}-08-15`, 'Mariä Himmelfahrt');
+  add(['TH'], `${y}-09-20`, 'Weltkindertag');
+  add(['BB', 'HB', 'HH', 'MV', 'NI', 'SN', 'ST', 'SH', 'TH'], `${y}-10-31`, 'Reformationstag');
+  add(['BW', 'BY', 'NW', 'RP', 'SL'], `${y}-11-01`, 'Allerheiligen');
+  add(['SN'], bussUndBettag, 'Buß- und Bettag');
+  holCache.set(key, map);
   return map;
 }
 
@@ -186,10 +257,15 @@ async function unpack(r) {
 }
 async function save(store, obj) { await idb.put(store, await pack(store, obj)); }
 async function saveMany(store, arr) { await idb.putMany(store, await Promise.all(arr.map((o) => pack(store, o)))); }
+async function saveProfile(p) {
+  S.profile = p;
+  await idb.put('settings', LOCK.key ? { enc: await aesEnc(LOCK.key, te.encode(JSON.stringify(p))) } : p, 'profile');
+}
 async function rewriteAll() {
   await saveMany('places', S.places);
   await saveMany('days', [...S.days.values()]);
   await saveMany('entries', S.entries);
+  await saveProfile(S.profile || {});
 }
 
 // ================= Zustand =================
@@ -199,10 +275,12 @@ const S = {
   month: new Date(now.getFullYear(), now.getMonth(), 1),
   year: now.getFullYear(),
   filter: 'alle',
+  q: '',
   places: [],
   days: new Map(),
   entries: [],
   cfg: {},
+  profile: {},
 };
 const placeById = (id) => S.places.find((p) => p.id === id);
 const autoShort = (name) => {
@@ -213,12 +291,31 @@ const autoShort = (name) => {
 };
 const short = (p) => p.short || autoShort(p.name);
 
+// Fortlaufende Belegnummer je Jahr: 2026-001, 2026-002, …
+function nextNr(year, exceptId) {
+  let max = 0;
+  for (const e of S.entries) {
+    if (e.id === exceptId || !e.nr?.startsWith(year + '-')) continue;
+    max = Math.max(max, +e.nr.slice(5) || 0);
+  }
+  return `${year}-${String(max + 1).padStart(3, '0')}`;
+}
+async function numberMissing() {
+  const todo = S.entries.filter((e) => !e.nr).sort((a, b) => a.date.localeCompare(b.date) || (a.created || 0) - (b.created || 0));
+  for (const e of todo) e.nr = nextNr(e.date.slice(0, 4), e.id);
+  if (todo.length) await saveMany('entries', todo);
+}
+
 async function load() {
   const un = async (s) => Promise.all((await idb.all(s)).map(unpack));
   S.places = (await un('places')).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   S.days = new Map((await un('days')).map((d) => [d.date, d]));
   S.entries = await un('entries');
   S.cfg = (await idb.get('settings', 'cfg')) || {};
+  const pr = await idb.get('settings', 'profile');
+  S.profile = !pr ? {} : pr.enc ? JSON.parse(td.decode(await aesDec(LOCK.key, pr.enc))) : pr;
+  holCache.clear();
+  await numberMissing();
 }
 async function saveCfg(patch) {
   Object.assign(S.cfg, patch);
@@ -237,7 +334,7 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => t.classList.remove('show'), 2600);
+  toast.t = setTimeout(() => t.classList.remove('show'), 2800);
 }
 
 let sheetUrls = [];
@@ -310,7 +407,7 @@ function render() {
 const pressed = (b) => (b ? 'true' : 'false');
 const placeMeta = (p) => {
   const days = WD_ORDER.filter((d) => (p.weekdays || []).includes(d)).map((d) => WD[d]).join(', ');
-  const art = p.mode === 'pendel' ? 'Entfernungspauschale' : 'Reisekosten';
+  const art = p.mode === 'pendel' ? 'Entfernungspauschale' : `Reisekosten${p.verpflegung ? ' + Verpflegung' : ''}`;
   return `${kmText(p.km)} km · ${art}${days ? ' · ' + days : ''}`;
 };
 const badge = (p) => `<span class="badge" style="--c:${p.color}">${esc(short(p))}</span>`;
@@ -328,7 +425,7 @@ function vFahrten() {
       <section class="card hero">
         <p class="eyebrow">Los geht's</p>
         <p class="big">Erst deine Orte anlegen</p>
-        <p>Zum Beispiel <b>Berufsschule</b>, <b>Arbeit Standort 1</b> und <b>Standort 2</b>, jeweils mit Entfernung und festen Wochentagen.</p>
+        <p>Zum Beispiel <b>Berufsschule</b>, <b>Arbeit Standort 1</b> und <b>Standort 2</b>, jeweils mit Anschrift, Entfernung und festen Wochentagen.</p>
         <button class="btn primary" data-act="place" style="margin-top:14px">+ Ort anlegen</button>
       </section>`;
   }
@@ -340,7 +437,10 @@ function vFahrten() {
   for (let d = 1; d <= dim; d++) {
     const dt = new Date(y, mo, d), ds = iso(dt), rec = S.days.get(ds), dow = dt.getDay();
     const calc = dayCalc(rec);
-    if (calc.length) { tage++; calc.forEach((c) => { sum += c.betrag; km += c.art === 'reise' ? c.km : c.km * 2; }); }
+    if (calc.length) {
+      tage++;
+      calc.forEach((c) => { sum += c.betrag; km += c.art === 'reise' ? c.km : c.art === 'pendel' ? c.km * 2 : 0; });
+    }
     const places = (rec?.placeIds || []).map(placeById).filter(Boolean);
     places.forEach((p) => { cnt[p.id] = (cnt[p.id] || 0) + 1; });
     const cls = ['cell'];
@@ -354,7 +454,7 @@ function vFahrten() {
     const pills = places.slice(0, 2).map((p) => `<i style="--c:${p.color}">${esc(short(p))}</i>`).join('') + (places.length > 2 ? `<i class="more">+${places.length - 2}</i>` : '');
     const stamp = rec?.status ? `<b class="stamp">${STATUS[rec.status]}</b>` : '';
     const label = `${d}. ${MONTHS[mo]}${hol.has(ds) ? ', ' + hol.get(ds) : ''}${places.length ? ': ' + places.map((p) => p.name).join(', ') : ''}${rec?.status ? ': ' + STATUS[rec.status] : ''}`;
-    cells += `<button class="${cls.join(' ')}"${style} data-act="day" data-date="${ds}" aria-label="${esc(label)}"><span class="n">${d}</span>${stamp}<span class="pills">${pills}</span></button>`;
+    cells += `<button class="${cls.join(' ')}"${style} data-act="day" data-date="${ds}" aria-label="${esc(label)}" title="${esc(hol.get(ds) || '')}"><span class="n">${d}</span>${stamp}<span class="pills">${pills}</span></button>`;
   }
 
   const monthStart = iso(new Date(y, mo, 1));
@@ -383,7 +483,7 @@ function vFahrten() {
         ${canFill ? '<button class="btn primary" data-act="fillPlan">Wochenplan eintragen</button>' : ''}
         <button class="btn" data-act="range">Zeitraum festlegen</button>
       </div>
-      <p class="explain">Tippe auf einen Tag, um ihn zu ändern. „Wochenplan eintragen“ füllt alle leeren Tage bis heute nach deinen festen Wochentagen (Feiertage ausgenommen).</p>
+      <p class="explain">Tippe auf einen Tag, um ihn zu ändern. „Wochenplan eintragen“ füllt alle leeren Tage bis heute nach deinen festen Wochentagen (Feiertage${S.cfg.bundesland ? ' in ' + LAENDER[S.cfg.bundesland] : ''} ausgenommen).</p>
     </section>
 
     <section class="card">
@@ -402,9 +502,11 @@ function vFahrten() {
 
 function calcHtml(calc) {
   if (!calc.length && !(calc.dropped || []).length) return '';
-  const lines = calc.map((c) => c.art === 'pendel'
-    ? `<div class="line"><span>${esc(c.p.name)} · ${kmText(c.km)} km einfach<br><small>Entfernungspauschale</small></span><b class="amt">${eur(c.betrag)}</b></div>`
-    : `<div class="line"><span>${esc(c.p.name)} · ${kmText(c.km)} km hin + zurück<br><small>Reisekosten 0,30 €/km</small></span><b class="amt">${eur(c.betrag)}</b></div>`);
+  const lines = calc.map((c) => {
+    if (c.art === 'pendel') return `<div class="line"><span>${esc(c.p.name)} · ${kmText(c.km)} km einfach<br><small>Entfernungspauschale</small></span><b class="amt">${eur(c.betrag)}</b></div>`;
+    if (c.art === 'reise') return `<div class="line"><span>${esc(c.p.name)} · ${kmText(c.km)} km hin + zurück<br><small>Reisekosten 0,30 €/km</small></span><b class="amt">${eur(c.betrag)}</b></div>`;
+    return `<div class="line"><span>Verpflegungspauschale<br><small>Abwesenheit über 8 Std.</small></span><b class="amt">${eur(c.betrag)}</b></div>`;
+  });
   (calc.dropped || []).forEach((c) => lines.push(`<div class="line"><span class="x">${esc(c.p.name)}</span><small>Pauschale nur 1× pro Tag</small></div>`));
   return lines.join('');
 }
@@ -429,7 +531,7 @@ function daySheet(ds) {
     <div class="field"><span class="lbl">Oder nicht gefahren</span>
       <div class="chips" id="dStatus">${statusChips()}</div>
     </div>
-    <label class="field"><span class="lbl">Notiz</span><input id="dNote" value="${esc(rec.note)}" placeholder="optional, z. B. Umweg Kunde"></label>
+    <label class="field"><span class="lbl">Notiz / Anlass</span><input id="dNote" value="${esc(rec.note)}" placeholder="optional, z. B. Kundentermin, Umweg"></label>
     <div class="calc" id="dCalc"></div>
     <div class="row-btns">
       <button class="btn ghost" id="dClear">Tag leeren</button>
@@ -566,7 +668,7 @@ function rangeSheet() {
 function placeSheet(id) {
   const ex = id ? placeById(id) : null;
   const pl = ex ? { ...ex, weekdays: [...(ex.weekdays || [])] } : {
-    id: uid(), name: '', short: '', km: '', bereich: 'ausbildung', mode: 'pendel', weekdays: [],
+    id: uid(), name: '', short: '', adresse: '', km: '', bereich: 'ausbildung', mode: 'pendel', verpflegung: false, weekdays: [],
     color: PALETTE[S.places.length % PALETTE.length], order: Date.now(),
   };
   const wds = new Set(pl.weekdays);
@@ -579,13 +681,15 @@ function placeSheet(id) {
       <label class="field grow"><span class="lbl">Name</span><input id="pName" value="${esc(pl.name)}" placeholder="z. B. Berufsschule" autocomplete="off"></label>
       <label class="field short"><span class="lbl">Kürzel</span><input id="pShort" maxlength="3" value="${esc(pl.short || '')}" placeholder="${esc(ex ? autoShort(ex.name) : 'BS')}" autocomplete="off"></label>
     </div>
-    <label class="field"><span class="lbl">Entfernung von zu Hause (einfach, km)</span><input id="pKm" inputmode="decimal" value="${pl.km === '' ? '' : kmText(pl.km)}" placeholder="z. B. 18"></label>
+    <label class="field"><span class="lbl">Anschrift (fürs Finanzamt)</span><input id="pAdr" value="${esc(pl.adresse || '')}" placeholder="Straße Nr., PLZ Ort" autocomplete="off"></label>
+    <label class="field"><span class="lbl">Entfernung von zu Hause (einfach, km)</span><input id="pKm" inputmode="decimal" value="${pl.km === '' ? '' : kmText(pl.km)}" placeholder="kürzeste Straßenverbindung, z. B. 18"></label>
     <div class="field"><span class="lbl">Bereich</span>
       <div class="seg" id="pBereich">${Object.entries(BEREICH).map(([k, v]) => `<button type="button" data-v="${k}">${v}</button>`).join('')}</div>
     </div>
     <div class="field"><span class="lbl">Abrechnung</span>
       <div class="seg" id="pMode"><button type="button" data-v="pendel">Arbeitsstätte</button><button type="button" data-v="reise">Auswärts</button></div>
       <p class="explain" id="pModeText"></p>
+      <label class="check" id="pVerpflWrap"><input type="checkbox" id="pVerpfl" ${pl.verpflegung ? 'checked' : ''}> Meist über 8 Std. von zu Hause weg (+14 € Verpflegungspauschale pro Tag)</label>
     </div>
     <div class="field"><span class="lbl">Feste Wochentage (Wochenplan)</span>
       <div class="chips" id="pWd">${WD_ORDER.map((d) => `<button type="button" class="chip plain" data-wd="${d}">${WD[d]}</button>`).join('')}</div>
@@ -605,13 +709,14 @@ function placeSheet(id) {
     $$('#pWd .chip', p).forEach((b) => b.setAttribute('aria-pressed', pressed(wds.has(+b.dataset.wd))));
     $$('#pColor button', p).forEach((b) => b.setAttribute('aria-pressed', pressed(pl.color === b.dataset.c)));
     $('#pShort', p).placeholder = autoShort($('#pName', p).value || 'BS');
+    $('#pVerpflWrap', p).hidden = pl.mode !== 'reise';
     const km = parseKm($('#pKm', p).value);
     const perDay = Number.isFinite(km) && km > 0
       ? (pl.mode === 'pendel' ? ` Bei ${kmText(km)} km: ${eur(pendelBetrag(km, year))} pro Tag (${year}).` : ` Bei ${kmText(km)} km: ${eur(km * 2 * REISE_RATE)} pro Tag.`)
       : '';
     $('#pModeText', p).textContent = pl.mode === 'pendel'
       ? `Erste Tätigkeitsstätte (z. B. Ausbildungsbetrieb): Entfernungspauschale, nur einfache Strecke, ${pendelSatzText(year)}.${perDay}`
-      : `Auswärtstätigkeit (z. B. Berufsschule, Kunde, Filiale): 0,30 € je gefahrenem km, Hin- und Rückweg.${perDay}`;
+      : `Auswärtstätigkeit (z. B. Berufsschule, Kunde, Filiale): 0,30 € je gefahrenem km, Hin- und Rückweg. Verpflegungspauschale bei Blockunterricht nur die ersten 3 Monate.${perDay}`;
   };
   sync();
   $('#pKm', p).addEventListener('input', sync);
@@ -629,7 +734,10 @@ function placeSheet(id) {
       const km = parseKm($('#pKm', p).value);
       if (!name) { toast('Bitte Namen eingeben.'); return; }
       if (!Number.isFinite(km) || km < 0) { toast('Bitte Entfernung in km eingeben.'); return; }
-      Object.assign(pl, { name, km, short: $('#pShort', p).value.trim().toUpperCase(), weekdays: [...wds] });
+      Object.assign(pl, {
+        name, km, adresse: $('#pAdr', p).value.trim(), short: $('#pShort', p).value.trim().toUpperCase(),
+        verpflegung: pl.mode === 'reise' && $('#pVerpfl', p).checked, weekdays: [...wds],
+      });
       await save('places', pl);
       const i = S.places.findIndex((x) => x.id === pl.id);
       if (i >= 0) S.places[i] = pl; else S.places.push(pl);
@@ -653,16 +761,19 @@ function placeSheet(id) {
 }
 
 // ================= Ansicht: Belege =================
-const entryAmount = (e) => (e.type === 'ausgabe' ? e.amount * (e.anteil ?? 100) / 100 : e.amount);
+const entryAmount = (e) => (e.type === 'ausgabe' ? e.amount * share(e) : e.amount);
+const searchText = (e) => `${e.nr} ${e.text} ${e.kategorie} ${e.ocr || ''} ${dec(e.amount)} ${deDate(e.date)}`.toLowerCase();
 
-function vBelege() {
-  const y = S.year;
+function belegListHtml() {
+  const y = S.year, q = S.q.trim().toLowerCase();
   const list = S.entries
-    .filter((e) => e.date.startsWith(y + '-') && (S.filter === 'alle' || e.bereich === S.filter))
-    .sort((a, b) => b.date.localeCompare(a.date) || (b.created || 0) - (a.created || 0));
-  const aus = list.filter((e) => e.type === 'ausgabe').reduce((s, e) => s + entryAmount(e), 0);
-  const ein = list.filter((e) => e.type === 'einnahme').reduce((s, e) => s + e.amount, 0);
-
+    .filter((e) => e.date.startsWith(y + '-') && (S.filter === 'alle' || e.bereich === S.filter) && (!q || searchText(e).includes(q)))
+    .sort((a, b) => b.date.localeCompare(a.date) || (b.nr || '').localeCompare(a.nr || ''));
+  if (!list.length) {
+    return q
+      ? `<div class="empty"><p class="big">Nichts gefunden</p><p class="muted">Keine Belege zu „${esc(S.q)}“ in ${y}.</p></div>`
+      : `<div class="empty"><p class="big">Noch nichts für ${y}</p><p class="muted">Tippe auf „Beleg scannen“: Kassenbon fotografieren, Betrag wird automatisch erkannt.</p></div>`;
+  }
   let groups = '', cur = '';
   for (const e of list) {
     const m = e.date.slice(0, 7);
@@ -675,12 +786,19 @@ function vBelege() {
     const a = entryAmount(e);
     groups += `<li><button class="row" data-act="entry" data-id="${e.id}">
       <span class="day-badge">${d.getDate()}<small>${WD[d.getDay()]}</small></span>
-      <span class="grow"><span class="t">${esc(e.text || e.kategorie)}</span><span class="s"><span class="tag ${e.bereich}">${BEREICH[e.bereich]}</span> ${esc(e.kategorie)}${e.type === 'ausgabe' && (e.anteil ?? 100) < 100 ? ` · ${e.anteil} %` : ''}</span></span>
-      ${e.photo ? '<svg class="clip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-label="Beleg vorhanden"><path d="M20 11.5l-8.2 8.2a5 5 0 01-7-7L13 4.4a3.3 3.3 0 014.7 4.7l-8.2 8.2a1.7 1.7 0 01-2.4-2.4l7.6-7.6"/></svg>' : ''}
+      <span class="grow"><span class="t">${esc(e.text || e.kategorie)}</span><span class="s"><span class="tag ${e.bereich}">${BEREICH[e.bereich]}</span> <span class="nr">${esc(e.nr || '')}</span> ${esc(e.kategorie)}${e.type === 'ausgabe' && (e.anteil ?? 100) < 100 ? ` · ${e.anteil} %` : ''}${afaNeeded(e) ? ' · AfA' : ''}</span></span>
+      ${e.photo ? '<svg class="clip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-label="Beleg vorhanden"><path d="M20 11.5l-8.2 8.2a5 5 0 01-7-7L13 4.4a3.3 3.3 0 014.7 4.7l-8.2 8.2a1.7 1.7 0 01-2.4-2.4l7.6-7.6"/></svg>' : '<span class="nophoto" title="Kein Beleg-Bild">!</span>'}
       <span class="amt ${e.type === 'ausgabe' ? 'neg' : 'pos'}">${e.type === 'ausgabe' ? '−' : '+'}${dec(a)}</span>
     </button></li>`;
   }
-  if (cur) groups += '</ul>';
+  return groups + '</ul>';
+}
+
+function vBelege() {
+  const y = S.year;
+  const all = S.entries.filter((e) => e.date.startsWith(y + '-') && (S.filter === 'alle' || e.bereich === S.filter));
+  const aus = all.filter((e) => e.type === 'ausgabe').reduce((s, e) => s + entryAmount(e), 0);
+  const ein = all.filter((e) => e.type === 'einnahme').reduce((s, e) => s + e.amount, 0);
 
   return `
     <section class="card">
@@ -697,18 +815,17 @@ function vBelege() {
         <button class="btn" data-act="newEntry" data-type="ausgabe">+ Ausgabe</button>
         <button class="btn" data-act="newEntry" data-type="einnahme">+ Einnahme</button>
       </div>
-      <div class="chips" style="margin-top:14px">
+      <div class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><input id="belegSearch" type="search" placeholder="Suchen: Laden, Betrag, Beleg-Nr., Text auf dem Bon" value="${esc(S.q)}" autocomplete="off"></div>
+      <div class="chips" style="margin-top:12px">
         ${[['alle', 'Alle'], ['ausbildung', 'Ausbildung'], ['gewerbe', 'Gewerbe']].map(([k, v]) => `<button class="chip plain filter" data-act="filter" data-f="${k}" aria-pressed="${pressed(S.filter === k)}">${v}</button>`).join('')}
       </div>
     </section>
     <section class="tiles">
-      <div class="tile"><b>${list.length}</b><span>Einträge</span></div>
+      <div class="tile"><b>${all.length}</b><span>Einträge</span></div>
       <div class="tile red"><b>${dec(aus)}</b><span>€ Ausgaben</span></div>
       <div class="tile green"><b>${dec(ein)}</b><span>€ Einnahmen</span></div>
     </section>
-    <section class="card">
-      ${list.length ? groups : `<div class="empty"><p class="big">Noch nichts für ${y}</p><p class="muted">Tippe auf „Beleg scannen“: Kassenbon fotografieren, Betrag wird automatisch erkannt.</p></div>`}
-    </section>`;
+    <section class="card" id="belegList">${belegListHtml()}</section>`;
 }
 
 // Öffnet einen Dateiauswahl-Dialog; Auto-Sperre pausiert solange (Kamera schickt die App in den Hintergrund)
@@ -732,15 +849,17 @@ function entrySheet(id, type, preset = {}) {
   const e = ex ? { ...ex } : {
     id: uid(), type: type || 'ausgabe', date: iso(new Date()), amount: NaN, text: '',
     bereich: type === 'einnahme' ? 'gewerbe' : (S.filter !== 'alle' ? S.filter : 'ausbildung'),
-    kategorie: '', anteil: 100, photo: null, ocr: '', created: Date.now(),
+    kategorie: '', anteil: 100, zahlung: S.cfg.lastZahlung || 'karte', ust: 19, edv: false, nd: 3,
+    photo: null, ocr: '', created: Date.now(),
   };
   let photo = preset.photo || e.photo;
   let ocrText = e.ocr || '';
   let busy = false;
   const initialDate = e.date;
+  const texts = [...new Set(S.entries.map((x) => x.text).filter(Boolean))].slice(0, 200);
 
   const p = openSheet(`
-    <p class="eyebrow">${ex ? 'Eintrag bearbeiten' : 'Neuer Eintrag'}</p>
+    <p class="eyebrow">${ex ? `Beleg ${esc(ex.nr || '')}` : 'Neuer Eintrag'}</p>
     <h2 id="eTitle"></h2>
     <div class="field"><div class="seg" id="eType"><button type="button" data-v="ausgabe">Ausgabe</button><button type="button" data-v="einnahme">Einnahme</button></div></div>
     <div class="field"><span class="lbl">Beleg</span>
@@ -755,8 +874,16 @@ function entrySheet(id, type, preset = {}) {
     <div class="field" id="eBereichWrap"><span class="lbl">Bereich</span>
       <div class="seg" id="eBereich">${Object.entries(BEREICH).map(([k, v]) => `<button type="button" data-v="${k}">${v}</button>`).join('')}</div>
     </div>
+    <div class="field" id="eUstWrap"><span class="lbl">Umsatzsteuer</span>
+      <div class="seg" id="eUst">${[19, 7, 0].map((v) => `<button type="button" data-v="${v}">${v} %</button>`).join('')}</div>
+    </div>
     <label class="field"><span class="lbl">Kategorie</span><select id="eKat"></select></label>
-    <label class="field"><span class="lbl">Beschreibung</span><input id="eText" value="${esc(e.text)}" placeholder="z. B. Tabellenbuch Metall" autocomplete="off"></label>
+    <div id="eAfaBox"></div>
+    <label class="field"><span class="lbl">Beschreibung</span><input id="eText" list="textList" value="${esc(e.text)}" placeholder="z. B. Tabellenbuch Metall" autocomplete="off"></label>
+    <datalist id="textList">${texts.map((t) => `<option value="${esc(t)}">`).join('')}</datalist>
+    <label class="field"><span class="lbl">Bezahlt mit</span>
+      <select id="eZahlung">${Object.entries(ZAHLUNG).map(([k, v]) => `<option value="${k}" ${k === e.zahlung ? 'selected' : ''}>${v}</option>`).join('')}</select>
+    </label>
     <div class="row-btns">
       ${ex ? '<button class="btn danger" id="eDel">Löschen</button>' : '<button class="btn ghost" data-act="closeSheet">Abbrechen</button>'}
       <button class="btn primary" id="eSave">Speichern</button>
@@ -787,21 +914,54 @@ function entrySheet(id, type, preset = {}) {
       </div>`;
   };
 
+  // Abschreibungs-Hinweis live aktualisieren
+  const syncAfa = () => {
+    const box = $('#eAfaBox', p);
+    const amount = parseNum($('#eAmount', p).value);
+    const probe = { ...e, amount: Number.isFinite(amount) ? amount : 0, kategorie: $('#eKat', p).value };
+    if (e.type !== 'ausgabe' || probe.kategorie !== 'Arbeitsmittel') { box.innerHTML = ''; return; }
+    const need = afaNeeded(probe), limit = afaLimit(probe);
+    box.innerHTML = `
+      <label class="check"><input type="checkbox" id="eEdv" ${e.edv ? 'checked' : ''}> Computer, Tablet, Handy oder Software (sofort voll absetzbar)</label>
+      ${need ? `<div class="afa-box">
+        <b>Über ${limit === 952 ? '952 € brutto' : '800 € netto'}: Abschreibung nötig</b>
+        <p>Der Betrag wird über die Nutzungsdauer verteilt, im Kaufjahr anteilig ab dem Kaufmonat.</p>
+        <label class="field"><span class="lbl">Nutzungsdauer (Jahre)</span><input id="eNd" inputmode="numeric" value="${e.nd || 3}"></label>
+        <p class="explain">Richtwerte (AfA-Tabelle): Möbel 13, Werkzeugmaschinen 10, Fahrrad 7, Kamera 7, Drucker/Monitor 1 (EDV). Im Zweifel beim Finanzamt/Steuerberater nachfragen.</p>
+      </div>` : ''}`;
+  };
+
   const sync = () => {
     $('#eTitle', p).textContent = e.type === 'ausgabe' ? 'Ausgabe' : 'Einnahme';
     $$('#eType button', p).forEach((b) => b.setAttribute('aria-pressed', pressed(e.type === b.dataset.v)));
     $$('#eBereich button', p).forEach((b) => b.setAttribute('aria-pressed', pressed(e.bereich === b.dataset.v)));
+    $$('#eUst button', p).forEach((b) => b.setAttribute('aria-pressed', pressed(+b.dataset.v === (e.ust ?? 19))));
     $('#eAnteilWrap', p).style.visibility = e.type === 'ausgabe' ? 'visible' : 'hidden';
     $('#eBereichWrap', p).style.display = e.type === 'ausgabe' ? '' : 'none';
+    $('#eUstWrap', p).style.display = e.bereich === 'gewerbe' && !kleinU() ? '' : 'none';
     const kats = e.type === 'ausgabe' ? AUSGABE_KAT : EINNAHME_KAT;
     const sel = $('#eKat', p);
     const keep = kats.includes(e.kategorie) ? e.kategorie : kats[0];
     sel.innerHTML = kats.map((k) => `<option ${k === keep ? 'selected' : ''}>${esc(k)}</option>`).join('');
     e.kategorie = keep;
+    syncAfa();
   };
   sync();
   renderPhoto();
-  $('#eKat', p).addEventListener('change', (ev) => { e.kategorie = ev.target.value; });
+  $('#eKat', p).addEventListener('change', (ev) => { e.kategorie = ev.target.value; syncAfa(); });
+  $('#eAmount', p).addEventListener('input', syncAfa);
+  p.addEventListener('change', (ev) => {
+    if (ev.target.id === 'eEdv') { e.edv = ev.target.checked; syncAfa(); }
+    if (ev.target.id === 'eNd') e.nd = Math.max(1, Math.round(parseNum(ev.target.value)) || 3);
+  });
+  // Bekannte Beschreibung → Kategorie/Bereich/Anteil wie beim letzten Mal
+  $('#eText', p).addEventListener('change', (ev) => {
+    const prev = S.entries.filter((x) => x.text === ev.target.value.trim() && x.type === e.type).sort((a, b) => b.date.localeCompare(a.date))[0];
+    if (!prev) return;
+    e.kategorie = prev.kategorie; e.bereich = prev.bereich;
+    $('#eAnteil', p).value = prev.anteil ?? 100;
+    sync();
+  });
 
   // Texterkennung: Betrag, Datum, Händler vorschlagen
   async function runOcr(source) {
@@ -815,9 +975,10 @@ function entrySheet(id, type, preset = {}) {
       const found = [];
       const amtInp = $('#eAmount', p), dateInp = $('#eDate', p), txtInp = $('#eText', p);
       if (r.amount && !amtInp.value.trim()) { amtInp.value = dec(r.amount); found.push(`Betrag ${eur(r.amount)}`); }
-      if (r.date && dateInp.value === initialDate && r.date !== dateInp.value) { dateInp.value = r.date; found.push(`Datum ${r.date.split('-').reverse().join('.')}`); }
+      if (r.date && dateInp.value === initialDate && r.date !== dateInp.value) { dateInp.value = r.date; found.push(`Datum ${deDate(r.date)}`); }
       if (r.name && !txtInp.value.trim()) { txtInp.value = r.name; found.push(`„${r.name}“`); }
       setOcr(found.length ? `Erkannt: ${found.join(', ')}. Bitte kurz prüfen.` : 'Text erkannt, aber kein Betrag gefunden. Bitte selbst eintragen.', found.length ? 'ok' : '');
+      syncAfa();
       renderPhoto();
     } catch (err) {
       setOcr(err.message && /Internet/.test(err.message) ? err.message : 'Texterkennung fehlgeschlagen. Betrag bitte selbst eintragen.', 'warn');
@@ -828,15 +989,14 @@ function entrySheet(id, type, preset = {}) {
   async function firstPageCanvas() {
     const blob = photoThumb(photo);
     if (!blob) return null;
-    return Scanner.toCanvas(await Scanner.loadImage(blob), 1800);
+    return Scanner.toCanvas(await Scanner.loadImage(blob), 2400);
   }
   async function doScan(file, keepPages) {
     const res = await Scanner.open(file, { pages: keepPages ? photo.pages : [] });
     if (!res) return;
-    const firstChanged = !keepPages;
     photo = { type: 'scan', name: 'Scan', pages: res.pages };
     renderPhoto();
-    if (firstChanged && S.cfg.ocr !== false) runOcr(res.first || await firstPageCanvas());
+    if (!keepPages && S.cfg.ocr !== false) runOcr(res.first || await firstPageCanvas());
   }
 
   if (preset.scanResult) {
@@ -851,6 +1011,7 @@ function entrySheet(id, type, preset = {}) {
     if (!b) return;
     if (b.parentElement?.id === 'eType') { e.type = b.dataset.v; if (e.type === 'einnahme') e.bereich = 'gewerbe'; sync(); }
     if (b.parentElement?.id === 'eBereich') { e.bereich = b.dataset.v; sync(); }
+    if (b.parentElement?.id === 'eUst') { e.ust = +b.dataset.v; sync(); }
     if (b.id === 'eScan') { const f = await pickFile({ accept: 'image/*', capture: true }); if (f) doScan(f, false); }
     if (b.id === 'eMore') doScan(null, true);
     if (b.id === 'ePick') {
@@ -871,17 +1032,23 @@ function entrySheet(id, type, preset = {}) {
       let anteil = Math.round(parseNum($('#eAnteil', p).value));
       if (!Number.isFinite(anteil)) anteil = 100;
       anteil = Math.min(100, Math.max(0, anteil));
-      Object.assign(e, { amount: round2(amount), date, anteil: e.type === 'ausgabe' ? anteil : 100, text: $('#eText', p).value.trim(), kategorie: $('#eKat', p).value, photo, ocr: ocrText });
+      const nd = $('#eNd', p) ? Math.max(1, Math.round(parseNum($('#eNd', p).value)) || 3) : e.nd;
+      Object.assign(e, {
+        amount: round2(amount), date, anteil: e.type === 'ausgabe' ? anteil : 100, text: $('#eText', p).value.trim(),
+        kategorie: $('#eKat', p).value, zahlung: $('#eZahlung', p).value, nd, photo, ocr: ocrText,
+      });
+      if (!e.nr || !e.nr.startsWith(date.slice(0, 4) + '-')) e.nr = nextNr(date.slice(0, 4), e.id);
       await save('entries', e);
       const i = S.entries.findIndex((x) => x.id === e.id);
       if (i >= 0) S.entries[i] = e; else S.entries.push(e);
+      if (S.cfg.lastZahlung !== e.zahlung) saveCfg({ lastZahlung: e.zahlung });
       askPersist();
       S.year = +date.slice(0, 4);
       closeSheet(); render();
-      toast('Gespeichert');
+      toast(`Gespeichert als Beleg ${e.nr}`);
     }
     if (b.id === 'eDel') {
-      if (!confirm('Eintrag wirklich löschen?')) return;
+      if (!confirm(`Beleg ${e.nr || ''} wirklich löschen?`)) return;
       await idb.del('entries', e.id);
       S.entries = S.entries.filter((x) => x.id !== e.id);
       closeSheet(); render();
@@ -898,37 +1065,69 @@ async function scanNew() {
 }
 
 // ================= Ansicht: Übersicht =================
+function entriesOfYear(y) {
+  return S.entries
+    .filter((e) => e.date.startsWith(y + '-') || yearAmount(e, y) > 0)
+    .sort((a, b) => a.date.localeCompare(b.date) || (a.nr || '').localeCompare(b.nr || ''));
+}
+
 function yearStats(y) {
-  const mk = () => ({ pendel: 0, pendelTage: 0, reise: 0, reiseKm: 0, aus: {}, ausSum: 0, ein: {}, einSum: 0 });
+  const mk = () => ({ pendel: 0, pendelTage: 0, reise: 0, reiseKm: 0, verpfl: 0, verpflTage: 0, posten: {}, ausSum: 0, einNetto: 0, einPosten: {}, ust: 0, vst: 0, konto: 0 });
   const r = { ausbildung: mk(), gewerbe: mk() };
-  const perPlace = {};
+  const perPlace = {}, warnings = [];
   for (const rec of S.days.values()) {
     if (!rec.date.startsWith(y + '-')) continue;
     for (const c of dayCalc(rec)) {
       const b = r[c.p.bereich] || r.ausbildung;
-      if (c.art === 'pendel') { b.pendel += c.betrag; b.pendelTage++; } else { b.reise += c.betrag; b.reiseKm += c.km; }
-      const pp = (perPlace[c.p.id] ||= { p: c.p, tage: 0, betrag: 0 });
-      pp.tage++; pp.betrag += c.betrag;
+      const pp = (perPlace[c.p.id] ||= { p: c.p, tage: 0, km: 0, fahrt: 0, betrag: 0, verpflTage: 0 });
+      if (c.art === 'pendel') { b.pendel += c.betrag; b.pendelTage++; pp.tage++; pp.km += c.km; pp.fahrt += c.betrag; }
+      else if (c.art === 'reise') { b.reise += c.betrag; b.reiseKm += c.km; pp.tage++; pp.km += c.km; pp.fahrt += c.betrag; }
+      else { b.verpfl += c.betrag; b.verpflTage++; pp.verpflTage++; }
+      pp.betrag += c.betrag;
     }
   }
   for (const e of S.entries) {
-    if (!e.date.startsWith(y + '-')) continue;
     const b = r[e.bereich] || r.gewerbe;
-    const a = entryAmount(e);
-    if (e.type === 'ausgabe') { b.aus[e.kategorie] = (b.aus[e.kategorie] || 0) + a; b.ausSum += a; }
-    else { b.ein[e.kategorie] = (b.ein[e.kategorie] || 0) + a; b.einSum += a; }
+    const inYear = e.date.startsWith(y + '-');
+    if (e.type === 'einnahme') {
+      if (!inYear) continue;
+      const n = netto(e);
+      b.einNetto += n; b.ust += e.amount - n;
+      const k = euerPosten(e);
+      b.einPosten[k] = (b.einPosten[k] || 0) + n;
+      if (!e.photo) warnings.push({ ref: e.nr, text: `${e.text || e.kategorie} (${eur(e.amount)}): kein Beleg hinterlegt (Rechnungskopie aufbewahren).` });
+      continue;
+    }
+    const a = yearAmount(e, y);
+    if (a > 0) {
+      const k = e.bereich === 'ausbildung' ? nPosten(e) : euerPosten(e);
+      b.posten[k] = (b.posten[k] || 0) + a;
+      b.ausSum += a;
+    }
+    if (inYear) {
+      b.vst += vstOf(e);
+      if (afaNeeded(e)) warnings.push({ ref: e.nr, text: `${e.text || e.kategorie}: über ${afaLimit(e) === 952 ? '952 € brutto' : '800 € netto'}, wird über ${e.nd || 3} Jahre abgeschrieben (${eur(a)} in ${y}). Nutzungsdauer prüfen.` });
+      if (!e.photo) warnings.push({ ref: e.nr, text: `${e.text || e.kategorie} (${eur(e.amount)}): kein Beleg-Bild hinterlegt.` });
+      if (e.bereich === 'ausbildung' && e.kategorie === 'Arbeitskleidung') warnings.push({ ref: e.nr, text: 'Arbeitskleidung ist nur absetzbar, wenn es typische Berufskleidung ist (z. B. Sicherheitsschuhe, Blaumann).' });
+    }
   }
-  return { ...r, perPlace };
+  for (const x of Object.values(perPlace)) {
+    if (x.p.mode === 'pendel' && !x.p.adresse) warnings.push({ ref: x.p.name, text: 'Anschrift der Arbeitsstätte fehlt (wird in Anlage N abgefragt).' });
+  }
+  if (S.cfg.kontofuehrung) r.ausbildung.konto = 16;
+  for (const b of Object.values(r)) for (const k of ['pendel', 'reise', 'verpfl', 'ausSum', 'einNetto', 'ust', 'vst']) b[k] = round2(b[k]);
+  return { ...r, perPlace, warnings };
 }
 
 function vUebersicht() {
   const y = S.year;
   const st = yearStats(y);
   const A = st.ausbildung, G = st.gewerbe;
-  const aTotal = A.pendel + A.reise + A.ausSum;
-  const gAus = G.pendel + G.reise + G.ausSum;
-  const gGewinn = G.einSum - gAus;
-  const rows = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr class="sub"><td>${esc(k)}</td><td>${dec(v)}</td></tr>`).join('');
+  const ku = kleinU();
+  const aTotal = A.pendel + A.reise + A.verpfl + A.ausSum + A.konto;
+  const gFahrt = G.pendel + G.reise + G.verpfl;
+  const gGewinn = G.einNetto - G.ausSum - gFahrt;
+  const rows = (obj, neg) => Object.entries(obj).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr class="sub"><td>${esc(k)}</td><td>${neg ? '−' : ''}${dec(v)}</td></tr>`).join('');
   const places = Object.values(st.perPlace);
 
   const hasData = S.entries.length || S.days.size;
@@ -945,29 +1144,45 @@ function vUebersicht() {
       </div>
     </section>
 
+    <section class="card export-card">
+      <p class="eyebrow">Für Finanzamt & Steuerberater</p>
+      <button class="btn primary block" data-act="exportPaket">Steuerpaket ${y} (ZIP)</button>
+      <p class="explain">Enthält: Steuerbericht als PDF (Zusammenfassung, Fahrtenliste, Belegliste, alle Belege), Fahrten und Belege als CSV und alle Belegdateien mit Belegnummer.</p>
+      <div class="btn-row"><button class="btn sm" data-act="exportBericht">Nur PDF-Bericht</button><button class="btn sm" data-act="exportCsvs">Nur CSV</button></div>
+    </section>
+
+    ${st.warnings.length ? `<section class="card warn-card">
+      <p class="eyebrow">Vor dem Abgeben prüfen</p>
+      <ul class="warn-list">${st.warnings.slice(0, 8).map((w) => `<li><b>${esc(w.ref)}</b> ${esc(w.text)}</li>`).join('')}</ul>
+      ${st.warnings.length > 8 ? `<p class="explain">… und ${st.warnings.length - 8} weitere, alle im PDF-Bericht.</p>` : ''}
+    </section>` : ''}
+
     <section class="card band aus">
       <header class="band-head"><p class="eyebrow">Ausbildung · Anlage N</p><h2>Werbungskosten</h2><b class="band-total">${eur(aTotal)}</b></header>
       <table class="ledger">
         <tr><td>Wege zur Arbeitsstätte<small>Entfernungspauschale, ${A.pendelTage} Tage</small></td><td>${dec(A.pendel)}</td></tr>
         <tr><td>Reisekosten Fahrten<small>z. B. Berufsschule, ${dec(A.reiseKm, 0)} km</small></td><td>${dec(A.reise)}</td></tr>
-        <tr><td>Ausgaben</td><td>${dec(A.ausSum)}</td></tr>
-        ${rows(A.aus)}
+        ${A.verpfl ? `<tr><td>Verpflegungsmehraufwand<small>${A.verpflTage} Tage × 14 €</small></td><td>${dec(A.verpfl)}</td></tr>` : ''}
+        ${rows(A.posten)}
+        ${A.konto ? '<tr><td>Kontoführungsgebühren<small>Pauschale ohne Nachweis</small></td><td>16,00</td></tr>' : ''}
         <tr class="total"><td>Summe</td><td>${dec(aTotal)} €</td></tr>
       </table>
       <p class="hint">Das Finanzamt zieht automatisch 1.230 € Arbeitnehmer-Pauschbetrag ab. Alles darüber senkt deine Steuer zusätzlich${aTotal > 1230 ? `, bei dir ${eur(aTotal - 1230)}.` : '. Du liegst noch darunter.'}</p>
     </section>
 
     <section class="card band gew">
-      <header class="band-head"><p class="eyebrow">Gewerbe · Anlage EÜR</p><h2>${gGewinn >= 0 ? 'Gewinn' : 'Verlust'}</h2><b class="band-total">${eur(gGewinn)}</b></header>
+      <header class="band-head"><p class="eyebrow">Gewerbe · Anlage EÜR${ku ? ' · Kleinunternehmer' : ''}</p><h2>${gGewinn >= 0 ? 'Gewinn' : 'Verlust'}</h2><b class="band-total">${eur(gGewinn)}</b></header>
       <table class="ledger">
-        <tr><td>Einnahmen</td><td class="pos">${dec(G.einSum)}</td></tr>
-        ${rows(G.ein)}
-        <tr><td>Betriebsausgaben</td><td class="neg">−${dec(G.ausSum)}</td></tr>
-        ${rows(G.aus)}
-        <tr><td>Fahrtkosten<small>${G.pendelTage ? `Pauschale ${G.pendelTage} Tage, ` : ''}${dec(G.reiseKm, 0)} km à 0,30 €</small></td><td class="neg">−${dec(G.pendel + G.reise)}</td></tr>
+        <tr><td>Betriebseinnahmen${ku ? '' : '<small>netto</small>'}</td><td class="pos">${dec(G.einNetto)}</td></tr>
+        ${rows(G.einPosten)}
+        ${ku ? '' : `<tr class="sub"><td>Vereinnahmte Umsatzsteuer</td><td>${dec(G.ust)}</td></tr>`}
+        <tr><td>Betriebsausgaben${ku ? '' : '<small>netto</small>'}</td><td class="neg">−${dec(G.ausSum)}</td></tr>
+        ${rows(G.posten, true)}
+        ${ku ? '' : `<tr class="sub"><td>Gezahlte Vorsteuer</td><td>${dec(G.vst)}</td></tr>`}
+        <tr><td>Fahrtkosten<small>${G.pendelTage ? `Betriebsstätte ${G.pendelTage} Tage, ` : ''}${dec(G.reiseKm, 0)} km à 0,30 €${G.verpfl ? `, Verpflegung ${G.verpflTage} Tage` : ''}</small></td><td class="neg">−${dec(gFahrt)}</td></tr>
         <tr class="total"><td>${gGewinn >= 0 ? 'Gewinn' : 'Verlust'}</td><td>${dec(gGewinn)} €</td></tr>
       </table>
-      <p class="hint">Vereinfachte Rechnung auf Basis der Bruttobeträge (Kleinunternehmer). Mit Umsatzsteuer bitte netto erfassen oder mit Steuerberater abstimmen.</p>
+      <p class="hint">${ku ? 'Kleinunternehmer (§ 19 UStG): Beträge brutto, keine Umsatzsteuer ausweisen.' : 'Regelbesteuerung: Gewinn netto gerechnet (Umsatzsteuer und Vorsteuer heben sich mit der Zahllast ans Finanzamt auf).'} Umstellen unter Mehr → Steuer-Einstellungen.</p>
     </section>
 
     ${places.length ? `<section class="card">
@@ -975,15 +1190,7 @@ function vUebersicht() {
       <ul class="list">${places.map((x) => `<li><div class="row">${badge(x.p)}<span class="grow"><span class="t">${esc(x.p.name)}</span><span class="s">${x.tage} Tage · ${esc(placeMeta(x.p))}</span></span><span class="amt">${dec(x.betrag)}</span></div></li>`).join('')}</ul>
     </section>` : ''}
 
-    <section class="card">
-      <p class="eyebrow">Für die Steuererklärung</p>
-      <div class="stack" style="margin-top:8px">
-        <button class="btn" data-act="exportFahrten">Fahrten ${y} als CSV</button>
-        <button class="btn" data-act="exportBelege">Belege ${y} als CSV</button>
-        <button class="btn" data-act="exportFotos">Belege ${y} als Dateien</button>
-      </div>
-      <p class="hint">Keine Steuerberatung. Die Werte sind Hilfsrechnungen nach den üblichen Pauschalen, bitte vor dem Eintragen in ELSTER kurz prüfen.</p>
-    </section>`;
+    <p class="hint" style="margin:0 4px 14px">Keine Steuerberatung. Die Werte sind Hilfsrechnungen nach den üblichen Pauschalen, bitte vor dem Eintragen in ELSTER prüfen. Belege aufbewahren: Buchungsbelege 8 Jahre, Aufzeichnungen 10 Jahre.</p>`;
 }
 
 // ================= Ansicht: Mehr =================
@@ -991,13 +1198,31 @@ function vMehr() {
   const last = S.cfg.lastBackup ? new Date(S.cfg.lastBackup).toLocaleString('de-DE') : 'noch nie';
   const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   const delay = S.cfg.lockDelay ?? 60;
+  const pr = S.profile || {};
   return `
+    <section class="card">
+      <p class="eyebrow">Persönliche Angaben</p>
+      <button class="row" data-act="profile">
+        <span class="grow"><span class="t">${esc(pr.name || 'Name und Anschrift eintragen')}</span><span class="s">${esc(pr.adresse || 'Erscheint im Steuerbericht, Anschrift = Startpunkt der Fahrten')}</span></span>
+        <span class="chev">›</span>
+      </button>
+    </section>
+
     <section class="card">
       <p class="eyebrow">Orte & Wochenplan</p>
       <ul class="list">
         ${S.places.map((p) => `<li><button class="row" data-act="place" data-id="${p.id}">${badge(p)}<span class="grow"><span class="t">${esc(p.name)} <span class="tag ${p.bereich}">${BEREICH[p.bereich]}</span></span><span class="s">${esc(placeMeta(p))}</span></span><span class="chev">›</span></button></li>`).join('') || '<li class="muted" style="padding:8px 0">Noch keine Orte.</li>'}
       </ul>
       <div class="btn-row"><button class="btn ghost" data-act="place">+ Ort hinzufügen</button></div>
+    </section>
+
+    <section class="card">
+      <p class="eyebrow">Steuer-Einstellungen</p>
+      <label class="field"><span class="lbl">Bundesland (für Feiertage)</span>
+        <select id="cfgLand">${Object.entries(LAENDER).map(([k, v]) => `<option value="${k}" ${k === (S.cfg.bundesland || '') ? 'selected' : ''}>${v}</option>`).join('')}</select>
+      </label>
+      <label class="check"><input type="checkbox" id="cfgKU" ${kleinU() ? 'checked' : ''}> Gewerbe ist Kleinunternehmer (§ 19 UStG, keine Umsatzsteuer)</label>
+      <label class="check"><input type="checkbox" id="cfgKonto" ${S.cfg.kontofuehrung ? 'checked' : ''}> Kontoführungspauschale 16 € ansetzen (Gehaltskonto, ohne Nachweis anerkannt)</label>
     </section>
 
     <section class="card ${LOCK.meta ? 'secure' : ''}">
@@ -1028,19 +1253,20 @@ function vMehr() {
     </section>
 
     <section class="card">
-      <p class="eyebrow">Scanner</p>
-      <label class="check"><input type="checkbox" id="ocrToggle" ${S.cfg.ocr !== false ? 'checked' : ''}> Beträge automatisch erkennen (Texterkennung)</label>
-      <p class="explain">Die Texterkennung läuft direkt auf dem iPhone. Beim ersten Mal lädt sie einmalig ca. 5 MB aus dem Internet.</p>
+      <p class="eyebrow">Export ${S.year}</p>
+      <div class="stack" style="margin-top:8px">
+        <button class="btn primary" data-act="exportPaket">Steuerpaket (ZIP)</button>
+        <button class="btn" data-act="exportBericht">Steuerbericht (PDF)</button>
+        <button class="btn" data-act="exportCsvs">Fahrten + Belege (CSV)</button>
+        <button class="btn" data-act="exportFotos">Nur Belegdateien</button>
+      </div>
+      <p class="explain">Jahr wechselst du unter „Belege“ oder „Übersicht“.</p>
     </section>
 
     <section class="card">
-      <p class="eyebrow">Export ${S.year}</p>
-      <div class="stack" style="margin-top:8px">
-        <button class="btn" data-act="exportFahrten">Fahrten als CSV</button>
-        <button class="btn" data-act="exportBelege">Belege als CSV</button>
-        <button class="btn" data-act="exportFotos">Belege als Dateien (JPG/PDF)</button>
-      </div>
-      <p class="explain">Jahr wechselst du unter „Belege“ oder „Übersicht“. CSV öffnet sich in Excel und Numbers.</p>
+      <p class="eyebrow">Scanner</p>
+      <label class="check"><input type="checkbox" id="ocrToggle" ${S.cfg.ocr !== false ? 'checked' : ''}> Beträge automatisch erkennen (Texterkennung)</label>
+      <p class="explain">Die Texterkennung läuft direkt auf dem iPhone. Beim ersten Mal lädt sie einmalig ca. 5 MB aus dem Internet.</p>
     </section>
 
     ${standalone ? '' : `<section class="card">
@@ -1058,6 +1284,22 @@ function vMehr() {
       <button class="btn danger block" data-act="wipe" style="margin-top:8px">Alle Daten löschen</button>
       <p class="explain">SteuerFinn · Daten nur lokal · keine Steuerberatung</p>
     </section>`;
+}
+
+function profileSheet() {
+  const pr = S.profile || {};
+  const p = openSheet(`
+    <p class="eyebrow">Für den Steuerbericht</p>
+    <h2>Persönliche Angaben</h2>
+    <label class="field"><span class="lbl">Name</span><input id="prName" value="${esc(pr.name || '')}" autocomplete="name"></label>
+    <label class="field"><span class="lbl">Wohnanschrift</span><input id="prAdr" value="${esc(pr.adresse || '')}" placeholder="Straße Nr., PLZ Ort" autocomplete="street-address"></label>
+    <label class="field"><span class="lbl">Gewerbe (Bezeichnung)</span><input id="prGew" value="${esc(pr.gewerbe || '')}" placeholder="z. B. Webdesign, Handel mit …"></label>
+    <p class="explain">Wird nur lokal gespeichert${LOCK.meta ? ' und verschlüsselt' : ''}.</p>
+    <div class="row-btns"><button class="btn ghost" data-act="closeSheet">Abbrechen</button><button class="btn primary" id="prSave">Speichern</button></div>`);
+  $('#prSave', p).onclick = async () => {
+    await saveProfile({ name: $('#prName', p).value.trim(), adresse: $('#prAdr', p).value.trim(), gewerbe: $('#prGew', p).value.trim() });
+    closeSheet(); render(); toast('Gespeichert');
+  };
 }
 
 // ================= PIN-Eingabe =================
@@ -1187,7 +1429,7 @@ async function unlock() {
 function lockNow() {
   if (!LOCK.meta || LOCK.showing) return;
   LOCK.key = null;
-  S.places = []; S.days = new Map(); S.entries = [];
+  S.places = []; S.days = new Map(); S.entries = []; S.profile = {};
   closeSheet();
   $('.scan')?.remove();
   $('#viewer').hidden = true; $('#viewer').innerHTML = '';
@@ -1231,9 +1473,10 @@ async function deliver(files) {
 }
 function readySheet(files) {
   return new Promise((res) => {
+    const size = files.reduce((s, f) => s + f.size, 0);
     const p = openSheet(`
       <p class="eyebrow">Export</p><h2>Datei bereit</h2>
-      <p class="small muted">${files.map((f) => esc(f.name)).join('<br>')}</p>
+      <p class="small muted">${files.map((f) => esc(f.name)).join('<br>')}<br>${dec(size / 1048576, 1)} MB</p>
       <div class="row-btns"><button class="btn ghost" data-act="closeSheet">Abbrechen</button><button class="btn primary" id="shareNow">Teilen / Sichern</button></div>`);
     $('#shareNow', p).onclick = async () => {
       try { await navigator.share({ files }); closeSheet(); res(true); }
@@ -1243,50 +1486,83 @@ function readySheet(files) {
 }
 const csvCell = (v) => { const s = String(v ?? ''); return /[;"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 const csvFile = (name, rows) => new File(['﻿' + rows.map((r) => r.map(csvCell).join(';')).join('\r\n')], name, { type: 'text/csv' });
-const deDate = (ds) => ds.split('-').reverse().join('.');
 
-function exportFahrten() {
-  const y = S.year;
-  const rows = [['Datum', 'Wochentag', 'Ort', 'Bereich', 'Art', 'Entfernung einfach (km)', 'Berechnungs-km', 'Betrag (€)', 'Notiz']];
+function fahrtenCsv(y) {
+  const rows = [['Datum', 'Wochentag', 'Ort / Anlass', 'Anschrift', 'Bereich', 'Art', 'Entfernung einfach (km)', 'Berechnungs-km', 'Betrag (€)', 'Notiz']];
   const recs = [...S.days.values()].filter((d) => d.date.startsWith(y + '-')).sort((a, b) => a.date.localeCompare(b.date));
   let sum = 0;
   for (const rec of recs) {
     const wd = WD_LONG[parseIso(rec.date).getDay()];
-    if (rec.status) { rows.push([deDate(rec.date), wd, '', '', STATUS[rec.status], '', '', '', rec.note || '']); continue; }
+    if (rec.status) { rows.push([deDate(rec.date), wd, STATUS[rec.status], '', '', '', '', '', '', rec.note || '']); continue; }
     for (const c of dayCalc(rec)) {
       sum += c.betrag;
-      rows.push([deDate(rec.date), wd, c.p.name, BEREICH[c.p.bereich], c.art === 'pendel' ? 'Entfernungspauschale' : 'Reisekosten 0,30 €/km', dec(c.p.km, 1), dec(c.km, 1), dec(c.betrag), rec.note || '']);
+      rows.push([deDate(rec.date), wd, c.p.name, c.p.adresse || '', BEREICH[c.p.bereich], artText(c.art), c.art === 'verpfl' ? '' : dec(c.p.km, 1), c.art === 'verpfl' ? '' : dec(c.km, 1), dec(c.betrag), rec.note || '']);
     }
   }
-  if (rows.length === 1) { toast(`Keine Fahrten in ${y}.`); return; }
-  rows.push([], ['Summe', '', '', '', '', '', '', dec(sum), '']);
-  deliver([csvFile(`SteuerFinn_Fahrten_${y}.csv`, rows)]);
+  if (rows.length === 1) return null;
+  rows.push([], ['Summe', '', '', '', '', '', '', '', dec(sum), '']);
+  if (S.profile?.adresse) rows.push(['Wohnung (Startpunkt)', '', S.profile.adresse]);
+  return csvFile(`Fahrten_${y}.csv`, rows);
 }
 
-function photoBase(e, i) {
-  const slug = (e.text || e.kategorie).normalize('NFKD').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
-  return `${e.date}_${pad(i + 1)}_${slug || 'Beleg'}_${dec(e.amount).replace(/\./g, '')}`;
+const slug = (s) => String(s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
+const belegBase = (e) => `${e.nr}_${slug(e.text || e.kategorie) || 'Beleg'}_${dec(e.amount).replace(/\./g, '')}`;
+
+function belegeCsv(y) {
+  const list = entriesOfYear(y);
+  if (!list.length) return null;
+  const ku = kleinU();
+  const rows = [['Beleg-Nr.', 'Datum', 'Typ', 'Bereich', 'Kategorie', 'Zuordnung Steuererklärung', 'Beschreibung', 'Bezahlt mit', 'Brutto (€)', 'USt-Satz', 'Netto (€)', 'USt/Vorsteuer (€)', 'Beruflich %', `Ansatz ${y} (€)`, 'Hinweis', 'Belegdatei']];
+  for (const e of list) {
+    const reg = e.bereich === 'gewerbe' && !ku;
+    const n = netto(e);
+    rows.push([
+      e.nr, deDate(e.date), e.type === 'ausgabe' ? 'Ausgabe' : 'Einnahme', BEREICH[e.bereich], e.kategorie,
+      e.bereich === 'ausbildung' ? `Anlage N: ${nPosten(e)}` : `Anlage EÜR: ${euerPosten(e)}`,
+      e.text, ZAHLUNG[e.zahlung] || '', dec(e.amount), reg ? `${e.ust ?? 19} %` : '', dec(n), reg ? dec(e.amount - n) : '',
+      e.type === 'ausgabe' ? e.anteil ?? 100 : '', dec(ansatz(e, y)),
+      afaNeeded(e) ? `AfA ${e.nd || 3} Jahre, Kauf ${deDate(e.date)}` : (e.edv && e.kategorie === 'Arbeitsmittel' ? 'Computer/Software, 1 Jahr Nutzungsdauer' : ''),
+      e.photo ? `${belegBase(e)}.${photoExt(e.photo)}` : 'fehlt',
+    ]);
+  }
+  return csvFile(`Belege_${y}.csv`, rows);
 }
 
-function exportBelege() {
+function exportCsvs() {
   const y = S.year;
-  const list = S.entries.filter((e) => e.date.startsWith(y + '-')).sort((a, b) => a.date.localeCompare(b.date));
-  if (!list.length) { toast(`Keine Belege in ${y}.`); return; }
-  const rows = [['Datum', 'Typ', 'Bereich', 'Kategorie', 'Beschreibung', 'Betrag brutto (€)', 'Beruflich %', 'Absetzbar / Einnahme (€)', 'Belegdatei']];
-  list.forEach((e, i) => rows.push([
-    deDate(e.date), e.type === 'ausgabe' ? 'Ausgabe' : 'Einnahme', BEREICH[e.bereich], e.kategorie, e.text,
-    dec(e.amount), e.type === 'ausgabe' ? e.anteil ?? 100 : '', dec(entryAmount(e)), e.photo ? `${photoBase(e, i)}.${photoExt(e.photo)}` : '',
-  ]));
-  deliver([csvFile(`SteuerFinn_Belege_${y}.csv`, rows)]);
-}
-
-function exportFotos() {
-  const y = S.year;
-  const list = S.entries.filter((e) => e.date.startsWith(y + '-')).sort((a, b) => a.date.localeCompare(b.date));
-  const files = [];
-  list.forEach((e, i) => { if (e.photo) files.push(photoFile(e.photo, photoBase(e, i))); });
-  if (!files.length) { toast(`Keine Belege mit Bild in ${y}.`); return; }
+  const files = [fahrtenCsv(y), belegeCsv(y)].filter(Boolean);
+  if (!files.length) { toast(`Keine Daten in ${y}.`); return; }
   deliver(files);
+}
+function belegFiles(y) {
+  return entriesOfYear(y).filter((e) => e.photo).map((e) => photoFile(e.photo, belegBase(e)));
+}
+function exportFotos() {
+  const files = belegFiles(S.year);
+  if (!files.length) { toast(`Keine Belege mit Bild in ${S.year}.`); return; }
+  deliver(files);
+}
+async function exportBericht() {
+  const y = S.year;
+  toast('Erstelle PDF-Bericht …');
+  try {
+    const blob = await Report.pdf(y);
+    await deliver([new File([blob], `Steuerbericht_${y}.pdf`, { type: 'application/pdf' })]);
+  } catch (err) { alert(err.message || 'PDF konnte nicht erstellt werden.'); }
+}
+async function exportPaket() {
+  const y = S.year;
+  if (!S.entries.length && !S.days.size) { toast(`Keine Daten in ${y}.`); return; }
+  toast('Erstelle Steuerpaket …');
+  try {
+    const files = [new File([await Report.pdf(y)], `Steuerbericht_${y}.pdf`, { type: 'application/pdf' })];
+    const f1 = fahrtenCsv(y), f2 = belegeCsv(y);
+    if (f1) files.push(f1);
+    if (f2) files.push(f2);
+    for (const f of belegFiles(y)) files.push(new File([f], `Belege/${f.name}`, { type: f.type }));
+    const name = `Steuerpaket_${y}${S.profile?.name ? '_' + slug(S.profile.name) : ''}.zip`;
+    await deliver([new File([await Report.zip(files)], name, { type: 'application/zip' })]);
+  } catch (err) { alert(err.message || 'Steuerpaket konnte nicht erstellt werden.'); }
 }
 
 function bufToB64(buf) {
@@ -1315,18 +1591,20 @@ async function backup() {
     places: S.places,
     days: [...S.days.values()],
     entries: S.entries.map((e) => ({ ...e, photo: phOut(e.photo) })),
+    profile: S.profile || {},
+    settings: { bundesland: S.cfg.bundesland, kleinunternehmer: S.cfg.kleinunternehmer, kontofuehrung: S.cfg.kontofuehrung },
   };
   const exported = new Date().toISOString();
   let out;
   if (LOCK.meta && LOCK.key) {
     const m = LOCK.meta;
     out = {
-      app: 'SteuerFinn', version: 2, exported, locked: true,
+      app: 'SteuerFinn', version: 3, exported, locked: true,
       lock: { salt: bufToB64(m.salt), iter: m.iter, wrapped: encOut(m.wrapped) },
       payload: encOut(await aesEnc(LOCK.key, te.encode(JSON.stringify(data)))),
     };
   } else {
-    out = { app: 'SteuerFinn', version: 2, exported, ...data };
+    out = { app: 'SteuerFinn', version: 3, exported, ...data };
   }
   const file = new File([JSON.stringify(out)], `SteuerFinn_Backup_${iso(new Date())}.json`, { type: 'application/json' });
   const ok = await deliver([file]);
@@ -1354,6 +1632,8 @@ async function restore() {
     await saveMany('places', data.places || []);
     await saveMany('days', data.days || []);
     await saveMany('entries', entries);
+    await saveProfile(data.profile || {});
+    if (data.settings) await saveCfg(Object.fromEntries(Object.entries(data.settings).filter(([, v]) => v !== undefined)));
     await load();
     render();
     toast('Backup geladen');
@@ -1366,7 +1646,8 @@ async function wipe() {
   if (!confirm('Wirklich ALLE Orte, Fahrten und Belege auf diesem Gerät löschen?')) return;
   if (!confirm('Letzte Warnung: Ohne Backup ist alles weg. Fortfahren?')) return;
   await idb.clearData();
-  S.places = []; S.days = new Map(); S.entries = [];
+  await idb.del('settings', 'profile');
+  S.places = []; S.days = new Map(); S.entries = []; S.profile = {};
   render();
   toast('Alles gelöscht');
 }
@@ -1377,12 +1658,12 @@ const ACT = {
   month: (el) => { S.month = new Date(S.month.getFullYear(), S.month.getMonth() + +el.dataset.d, 1); S.year = S.month.getFullYear(); render(); },
   year: (el) => { S.year += +el.dataset.d; S.month = new Date(S.year, S.month.getMonth(), 1); render(); },
   day: (el) => daySheet(el.dataset.date),
-  fillPlan, range: rangeSheet, scanNew,
+  fillPlan, range: rangeSheet, scanNew, profile: profileSheet,
   place: (el) => placeSheet(el.dataset.id),
   entry: (el) => entrySheet(el.dataset.id),
   newEntry: (el) => entrySheet(null, el.dataset.type),
   filter: (el) => { S.filter = el.dataset.f; render(); },
-  exportFahrten, exportBelege, exportFotos, backup, restore, wipe, closeSheet,
+  exportPaket, exportBericht, exportCsvs, exportFotos, backup, restore, wipe, closeSheet,
   enableLock, changePin, disableLock, lockNow,
 };
 document.addEventListener('click', (e) => {
@@ -1391,9 +1672,16 @@ document.addEventListener('click', (e) => {
   const fn = ACT[el.dataset.act];
   if (fn) { e.preventDefault(); fn(el, e); }
 });
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'belegSearch') { S.q = e.target.value; $('#belegList').innerHTML = belegListHtml(); }
+});
 document.addEventListener('change', async (e) => {
-  if (e.target.id === 'lockDelay') { await saveCfg({ lockDelay: +e.target.value }); toast('Gespeichert'); }
-  if (e.target.id === 'ocrToggle') { await saveCfg({ ocr: e.target.checked }); }
+  const t = e.target;
+  if (t.id === 'lockDelay') { await saveCfg({ lockDelay: +t.value }); toast('Gespeichert'); }
+  if (t.id === 'ocrToggle') await saveCfg({ ocr: t.checked });
+  if (t.id === 'cfgLand') { await saveCfg({ bundesland: t.value }); holCache.clear(); toast('Feiertage aktualisiert'); }
+  if (t.id === 'cfgKU') { await saveCfg({ kleinunternehmer: t.checked }); toast(t.checked ? 'Kleinunternehmer: Beträge brutto' : 'Regelbesteuerung: USt-Satz je Beleg wählbar'); }
+  if (t.id === 'cfgKonto') await saveCfg({ kontofuehrung: t.checked });
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#sheet').classList.contains('open')) closeSheet(); });
 

@@ -3,8 +3,8 @@
    Ecken finden → entzerren → Filter (Farbe / S/W) → mehrere Seiten → JPEG oder PDF.
    Texterkennung (OCR) mit Tesseract.js, wird erst bei Bedarf geladen. */
 const Scanner = (() => {
-  const MAX_SRC = 2400;   // Kantenlänge Quellbild
-  const MAX_OUT = 2000;   // Kantenlänge Ergebnis
+  const MAX_SRC = 3400;   // Kantenlänge Quellbild (iPhone-Foto 4032 px → kaum Verlust)
+  const MAX_OUT = 2800;   // Kantenlänge Ergebnis (ca. 300 dpi bei A4-Breite)
   const TESS_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
 
   // ---------- Bild laden / Canvas ----------
@@ -57,38 +57,26 @@ const Scanner = (() => {
     { x: w * f, y: h * f }, { x: w * (1 - f), y: h * f }, { x: w * (1 - f), y: h * (1 - f) }, { x: w * f, y: h * (1 - f) },
   ];
 
-  // Sucht die größte helle Fläche (Papier) und nimmt deren äußerste Ecken.
-  function detect(canvas) {
-    const s = Math.min(1, 360 / Math.max(canvas.width, canvas.height));
-    const w = Math.max(1, Math.round(canvas.width * s)), h = Math.max(1, Math.round(canvas.height * s));
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    const x = c.getContext('2d', { willReadFrequently: true });
-    x.filter = 'blur(1.5px)';
-    x.drawImage(canvas, 0, 0, w, h);
-    const d = x.getImageData(0, 0, w, h).data;
-    const n = w * h, g = new Uint8Array(n), hist = new Uint32Array(256);
-    for (let i = 0; i < n; i++) { const v = (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8; g[i] = v; hist[v]++; }
-    const t = otsu(hist, n);
-    const lab = new Int32Array(n), stack = new Int32Array(n);
+  // Größte zusammenhängende Fläche einer Maske → äußerste Ecken
+  function component(mask, w, h) {
+    const n = w * h, lab = new Int32Array(n), stack = new Int32Array(n);
     let best = 0, bestSize = 0, cur = 0;
     for (let i = 0; i < n; i++) {
-      if (g[i] <= t || lab[i]) continue;
+      if (!mask[i] || lab[i]) continue;
       cur++;
       let sp = 0, size = 0;
       stack[sp++] = i; lab[i] = cur;
       while (sp) {
         const p = stack[--sp]; size++;
         const px = p % w, py = (p / w) | 0;
-        if (px > 0 && g[p - 1] > t && !lab[p - 1]) { lab[p - 1] = cur; stack[sp++] = p - 1; }
-        if (px < w - 1 && g[p + 1] > t && !lab[p + 1]) { lab[p + 1] = cur; stack[sp++] = p + 1; }
-        if (py > 0 && g[p - w] > t && !lab[p - w]) { lab[p - w] = cur; stack[sp++] = p - w; }
-        if (py < h - 1 && g[p + w] > t && !lab[p + w]) { lab[p + w] = cur; stack[sp++] = p + w; }
+        if (px > 0 && mask[p - 1] && !lab[p - 1]) { lab[p - 1] = cur; stack[sp++] = p - 1; }
+        if (px < w - 1 && mask[p + 1] && !lab[p + 1]) { lab[p + 1] = cur; stack[sp++] = p + 1; }
+        if (py > 0 && mask[p - w] && !lab[p - w]) { lab[p - w] = cur; stack[sp++] = p - w; }
+        if (py < h - 1 && mask[p + w] && !lab[p + w]) { lab[p + w] = cur; stack[sp++] = p + w; }
       }
       if (size > bestSize) { bestSize = size; best = cur; }
     }
-    if (!best || bestSize < n * 0.1) return inset(canvas.width, canvas.height);
-    if (bestSize > n * 0.96) return inset(canvas.width, canvas.height, 0.01);
+    if (!best) return { size: 0 };
     let tl = [0, 0, Infinity], br = [0, 0, -Infinity], tr = [0, 0, -Infinity], bl = [0, 0, Infinity];
     for (let i = 0; i < n; i++) {
       if (lab[i] !== best) continue;
@@ -98,8 +86,85 @@ const Scanner = (() => {
       if (b > tr[2]) tr = [px, py, b];
       if (b < bl[2]) bl = [px, py, b];
     }
-    const q = [tl, tr, br, bl].map(([px, py]) => ({ x: (px + 0.5) / s, y: (py + 0.5) / s }));
-    return quadArea(q) < canvas.width * canvas.height * 0.08 ? inset(canvas.width, canvas.height) : q;
+    return { size: bestSize, pts: [tl, tr, br, bl] };
+  }
+
+  // 1) helles Papier auf dunklerem Grund (Otsu), 2) sonst: alles, was sich deutlich von der Randfarbe abhebt
+  function detect(canvas) {
+    const s = Math.min(1, 360 / Math.max(canvas.width, canvas.height));
+    const w = Math.max(1, Math.round(canvas.width * s)), h = Math.max(1, Math.round(canvas.height * s));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const x = c.getContext('2d', { willReadFrequently: true });
+    x.imageSmoothingQuality = 'high';
+    x.drawImage(canvas, 0, 0, w, h);
+    const d = x.getImageData(0, 0, w, h).data;
+    const n = w * h, g = new Uint8Array(n), hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) { const v = (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8; g[i] = v; hist[v]++; }
+    const inQuad = (q, px, py) => { // konvexes Viereck, Punkt innen?
+      let sign = 0;
+      for (let k = 0; k < 4; k++) {
+        const a = q[k], b = q[(k + 1) % 4];
+        const cr = (b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0]);
+        if (cr !== 0) { if (!sign) sign = Math.sign(cr); else if (Math.sign(cr) !== sign) return false; }
+      }
+      return true;
+    };
+    // Wie gut füllt die Fläche das gefundene Viereck? (IoU, 1 = perfektes Rechteck)
+    const score = (mask) => {
+      const r = component(mask, w, h);
+      if (r.size < n * 0.08 || r.size > n * 0.97) return { r, iou: 0 };
+      const q = r.pts;
+      let inter = 0, qa = 0;
+      for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+        if (!inQuad(q, xx, yy)) continue;
+        qa++;
+        if (mask[yy * w + xx]) inter++;
+      }
+      return { r, iou: inter / (qa + r.size - inter || 1) };
+    };
+
+    // Kandidat A: helles Papier (Otsu auf Helligkeit)
+    const tA = otsu(hist, n);
+    const mA = new Uint8Array(n);
+    for (let i = 0; i < n; i++) mA[i] = g[i] > tA ? 1 : 0;
+    // Kandidat B: farbloses Papier vor farbigem Untergrund (Holz, Stoff), robust gegen Schatten
+    const sat = new Uint8Array(n), hs = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const r0 = d[i * 4], g0 = d[i * 4 + 1], b0 = d[i * 4 + 2];
+      const mx = Math.max(r0, g0, b0), mn = Math.min(r0, g0, b0);
+      sat[i] = mx ? Math.min(255, ((mx - mn) * 255 / mx) | 0) : 0;
+      hs[sat[i]]++;
+    }
+    const tB = otsu(hs, n);
+    const mB = new Uint8Array(n);
+    for (let i = 0; i < n; i++) mB[i] = sat[i] < tB && g[i] > 35 ? 1 : 0;
+    // Kandidat C: alles, was sich von der Randfarbe abhebt
+    const bw = Math.max(2, Math.round(Math.min(w, h) * 0.03));
+    let sr = 0, sg = 0, sb = 0, cnt = 0;
+    for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+      if (xx >= bw && xx < w - bw && yy >= bw && yy < h - bw) continue;
+      const i = (yy * w + xx) * 4; sr += d[i]; sg += d[i + 1]; sb += d[i + 2]; cnt++;
+    }
+    sr /= cnt; sg /= cnt; sb /= cnt;
+    const mC = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const dr = d[i * 4] - sr, dg = d[i * 4 + 1] - sg, db = d[i * 4 + 2] - sb;
+      mC[i] = dr * dr + dg * dg + db * db > 40 * 40 ? 1 : 0;
+    }
+
+    // Papier füllt fast das ganze Bild?
+    const all = component(mA, w, h);
+    if (all.size > n * 0.96) return inset(canvas.width, canvas.height, 0.01);
+
+    let best = null;
+    for (const m of [mA, mB, mC]) {
+      const sc = score(m);
+      if (sc.iou > 0.8 && (!best || sc.iou > best.iou)) best = sc;
+    }
+    if (!best) return inset(canvas.width, canvas.height);
+    const q = best.r.pts.map(([px, py]) => ({ x: (px + 0.5) / s, y: (py + 0.5) / s }));
+    return quadArea(q) >= canvas.width * canvas.height * 0.08 ? q : inset(canvas.width, canvas.height);
   }
 
   // ---------- Perspektive entzerren ----------
@@ -166,43 +231,120 @@ const Scanner = (() => {
   }
 
   // ---------- Filter ----------
-  // Hintergrund (Papier + Schatten) grob schätzen, dann herausrechnen → gleichmäßig weißes Papier
-  function background(canvas) {
-    const w = canvas.width, h = canvas.height;
-    const sm = document.createElement('canvas');
-    sm.width = Math.max(1, Math.round(w / 28)); sm.height = Math.max(1, Math.round(h / 28));
-    const sx = sm.getContext('2d');
-    sx.filter = 'blur(2px)';
-    sx.drawImage(canvas, 0, 0, sm.width, sm.height);
-    const bg = document.createElement('canvas');
-    bg.width = w; bg.height = h;
-    const bx = bg.getContext('2d', { willReadFrequently: true });
-    bx.imageSmoothingQuality = 'high';
-    bx.drawImage(sm, 0, 0, w, h);
-    return bx.getImageData(0, 0, w, h).data;
+  // Papierhelligkeit je Bildbereich schätzen (Maximum in 8×8-Blöcken, dann Schrift „wegwachsen“ und glätten).
+  // Teilt man das Bild dadurch, verschwinden Schatten und Farbstich, das Papier wird gleichmäßig weiß.
+  function bgMap(d, w, h) {
+    const B = 8, sw = Math.ceil(w / B), sh = Math.ceil(h / B), n = sw * sh;
+    const maps = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+    for (let y = 0; y < h; y++) {
+      const rowB = ((y / B) | 0) * sw;
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4, j = rowB + ((x / B) | 0);
+        if (d[i] > maps[0][j]) maps[0][j] = d[i];
+        if (d[i + 1] > maps[1][j]) maps[1][j] = d[i + 1];
+        if (d[i + 2] > maps[2][j]) maps[2][j] = d[i + 2];
+      }
+    }
+    const pass = (m, r, isMax) => {
+      const t = new Float32Array(n), o = new Float32Array(n);
+      for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+        let acc = 0, c = 0;
+        for (let k = -r; k <= r; k++) {
+          const v = m[y * sw + Math.min(sw - 1, Math.max(0, x + k))];
+          if (isMax) { if (v > acc) acc = v; } else { acc += v; c++; }
+        }
+        t[y * sw + x] = isMax ? acc : acc / c;
+      }
+      for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+        let acc = 0, c = 0;
+        for (let k = -r; k <= r; k++) {
+          const v = t[Math.min(sh - 1, Math.max(0, y + k)) * sw + x];
+          if (isMax) { if (v > acc) acc = v; } else { acc += v; c++; }
+        }
+        o[y * sw + x] = isMax ? acc : acc / c;
+      }
+      return o;
+    };
+    return { maps: maps.map((m) => pass(pass(pass(m, 2, true), 3, false), 2, false)), sw, sh, B };
   }
+
+  // Unscharf maskieren (3×3), macht Schrift knackiger
+  function sharpen(o, w, h, ch, amt) {
+    const n = w * h, t = new Float32Array(n), b = new Float32Array(n);
+    for (let c = 0; c < ch; c++) {
+      for (let y = 0; y < h; y++) {
+        const r = y * w;
+        for (let x = 0; x < w; x++) {
+          const xl = x > 0 ? x - 1 : x, xr = x < w - 1 ? x + 1 : x;
+          t[r + x] = (o[(r + xl) * ch + c] + o[(r + x) * ch + c] + o[(r + xr) * ch + c]) / 3;
+        }
+      }
+      for (let y = 0; y < h; y++) {
+        const ru = (y > 0 ? y - 1 : y) * w, r = y * w, rd = (y < h - 1 ? y + 1 : y) * w;
+        for (let x = 0; x < w; x++) b[r + x] = (t[ru + x] + t[r + x] + t[rd + x]) / 3;
+      }
+      for (let p = 0; p < n; p++) { const k = p * ch + c; o[k] += amt * (o[k] - b[p]); }
+    }
+  }
+
+  // Modi: original | farbe (verbessert) | grau | sw
   function filter(canvas, mode) {
     if (mode === 'original') return canvas;
-    const w = canvas.width, h = canvas.height;
+    const w = canvas.width, h = canvas.height, n = w * h;
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
     const x = c.getContext('2d', { willReadFrequently: true });
     x.drawImage(canvas, 0, 0);
     const img = x.getImageData(0, 0, w, h), d = img.data;
-    const bg = background(canvas);
-    for (let i = 0; i < d.length; i += 4) {
-      if (mode === 'sw') {
-        const g = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
-        const b = Math.max(40, (bg[i] * 77 + bg[i + 1] * 150 + bg[i + 2] * 29) >> 8);
-        const r = g / b; // 1 = Papier, < 1 = Schrift
-        const v = r > 0.9 ? 255 : r < 0.62 ? 0 : ((r - 0.62) / 0.28) * 255;
-        d[i] = d[i + 1] = d[i + 2] = v;
-      } else {
-        for (let ch = 0; ch < 3; ch++) {
-          const r = Math.min(1, d[i + ch] / Math.max(40, bg[i + ch] * 0.94));
-          d[i + ch] = 255 * r ** 1.6;
-        }
+    const { maps, sw, sh, B } = bgMap(d, w, h);
+    const [m0, m1, m2] = maps;
+    const color = mode === 'farbe', ch = color ? 3 : 1;
+    const ratio = new Float32Array(n * ch);
+    const hist = new Uint32Array(256);
+    const SCALE = 212; // Verhältnis 0…1,2 → 0…255
+
+    for (let y = 0; y < h; y++) {
+      let fy = (y + 0.5) / B - 0.5; fy = fy < 0 ? 0 : fy > sh - 1 ? sh - 1 : fy;
+      const y0 = fy | 0, y1 = Math.min(sh - 1, y0 + 1), ty = fy - y0;
+      for (let xx = 0; xx < w; xx++) {
+        let fx = (xx + 0.5) / B - 0.5; fx = fx < 0 ? 0 : fx > sw - 1 ? sw - 1 : fx;
+        const x0 = fx | 0, x1 = Math.min(sw - 1, x0 + 1), tx = fx - x0;
+        const a = y0 * sw + x0, b = y0 * sw + x1, cc = y1 * sw + x0, dd = y1 * sw + x1;
+        const bl = (m) => { const t = m[a] + (m[b] - m[a]) * tx, u = m[cc] + (m[dd] - m[cc]) * tx; return Math.max(24, t + (u - t) * ty); };
+        const br = bl(m0), bgg = bl(m1), bb = bl(m2);
+        const p = y * w + xx, i = p * 4;
+        const lum = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) / (br * 0.299 + bgg * 0.587 + bb * 0.114);
+        hist[Math.min(255, (lum * SCALE) | 0)]++;
+        if (color) { ratio[p * 3] = d[i] / br; ratio[p * 3 + 1] = d[i + 1] / bgg; ratio[p * 3 + 2] = d[i + 2] / bb; }
+        else ratio[p] = lum;
       }
+    }
+
+    // Schwarzpunkt = dunkelste 0,4 %, Weißpunkt knapp unter Papier
+    let acc = 0, bp = 0;
+    for (let k = 0; k < 256; k++) { acc += hist[k]; if (acc > n * 0.004) { bp = k / SCALE; break; } }
+    bp = Math.min(bp, 0.5);
+    const wp = 0.9;
+    let lo = bp, hi = wp;
+    if (mode === 'sw') { // Trennung Schrift/Papier automatisch (Otsu), weicher Übergang gegen Treppchen
+      const hs = hist.slice();
+      for (let k = Math.round(wp * SCALE); k < 256; k++) hs[k] = 0;
+      let tot = 0; for (const v of hs) tot += v;
+      let t = otsu(hs, tot) / SCALE;
+      t = Math.min(wp - 0.06, Math.max(bp + 0.12, t));
+      lo = t - 0.09; hi = t + 0.07;
+    }
+    const span = hi - lo, o = new Float32Array(n * ch);
+    for (let k = 0; k < n * ch; k++) {
+      let v = (ratio[k] - lo) / span;
+      v = v < 0 ? 0 : v > 1 ? 1 : v;
+      o[k] = mode === 'sw' ? v * 255 : 255 * Math.pow(v, 1.3);
+    }
+    if (mode !== 'sw') sharpen(o, w, h, ch, 0.9);
+    for (let p = 0; p < n; p++) {
+      const i = p * 4;
+      if (color) { d[i] = o[p * 3]; d[i + 1] = o[p * 3 + 1]; d[i + 2] = o[p * 3 + 2]; }
+      else d[i] = d[i + 1] = d[i + 2] = o[p];
     }
     x.putImageData(img, 0, 0);
     return c;
@@ -254,7 +396,7 @@ const Scanner = (() => {
   }
   async function ocr(source, onProgress) {
     await loadTesseract();
-    const c = toCanvas(source, 1800);
+    const c = toCanvas(source, 2400);
     const worker = await Tesseract.createWorker('deu', 1, {
       logger: (m) => { if (m.status === 'recognizing text' && onProgress) onProgress(m.progress); },
     });
@@ -317,7 +459,8 @@ const Scanner = (() => {
 
       let src = null;   // aktuelles Quellbild (Canvas)
       let quad = null;  // Ecken in Quell-Koordinaten
-      let mode = localStorage.getItem('sf-scan-mode') || 'farbe';
+      let mode = 'grau';
+      try { mode = localStorage.getItem('sf-scan-mode') || 'grau'; } catch { /* privat */ }
       let warped = null, result = null, rot = 0;
 
       const finish = (val) => {
@@ -357,7 +500,7 @@ const Scanner = (() => {
             <button class="scan-link strong" data-s="next">Weiter</button>
           </header>
           <div class="scan-stage"><canvas></canvas></div>
-          <p class="scan-tip">Ziehe die Punkte auf die Ecken des Belegs.</p>
+          <p class="scan-tip">Ziehe die Punkte auf die Ecken des Belegs.<br><small>Tipp: dunkler Untergrund, gleichmäßiges Licht, ohne Blitz.</small></p>
           <footer class="scan-tools">
             <button data-s="rot"><span>↻</span>Drehen</button>
             <button data-s="auto"><span>◎</span>Erkennen</button>
@@ -464,29 +607,32 @@ const Scanner = (() => {
           </header>
           <div class="scan-stage"><img alt="Vorschau"></div>
           <footer class="scan-tools">
-            <div class="scan-seg">${[['original', 'Original'], ['farbe', 'Farbe'], ['sw', 'S/W']].map(([k, v]) => `<button data-m="${k}" aria-pressed="${k === mode}">${v}</button>`).join('')}</div>
+            <div class="scan-seg">${[['original', 'Original'], ['farbe', 'Farbe'], ['grau', 'Grau'], ['sw', 'S/W']].map(([k, v]) => `<button data-m="${k}" aria-pressed="${k === mode}">${v}</button>`).join('')}</div>
             <button data-s="rot"><span>↻</span>Drehen</button>
           </footer>`;
         root.append(picker);
         const img = root.querySelector('img');
         let url;
-        const show = () => { if (url) URL.revokeObjectURL(url); result.toBlob((b) => { url = URL.createObjectURL(b); img.src = url; }, 'image/jpeg', 0.85); };
+        const show = () => { if (url) URL.revokeObjectURL(url); result.toBlob((b) => { url = URL.createObjectURL(b); img.src = url; img.style.opacity = ''; }, 'image/jpeg', 0.85); };
         show();
         root.onclick = async (e) => {
           const m = e.target.closest('[data-m]');
           if (m) {
-            mode = m.dataset.m; localStorage.setItem('sf-scan-mode', mode);
+            mode = m.dataset.m;
+            try { localStorage.setItem('sf-scan-mode', mode); } catch { /* privat */ }
             root.querySelectorAll('[data-m]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.m === mode));
-            apply(); show(); return;
+            img.style.opacity = '.4';
+            setTimeout(() => { apply(); show(); }, 20);
+            return;
           }
           const b = e.target.closest('[data-s]');
           if (!b) return;
           if (b.dataset.s === 'back') { if (url) URL.revokeObjectURL(url); cropStep(); }
-          if (b.dataset.s === 'rot') { rot = (rot + 1) % 4; apply(); show(); }
+          if (b.dataset.s === 'rot') { img.style.opacity = '.4'; setTimeout(() => { rot = (rot + 1) % 4; apply(); show(); }, 20); }
           if (b.dataset.s === 'take') {
             if (url) URL.revokeObjectURL(url);
             busy('Speichere Seite …');
-            const blob = await toBlob(result, mode === 'sw' ? 0.78 : 0.82);
+            const blob = await toBlob(result, mode === 'original' || mode === 'farbe' ? 0.88 : 0.86);
             pages.push({ data: await blob.arrayBuffer(), w: result.width, h: result.height, canvas: result });
             src = null;
             reviewStep();

@@ -13,8 +13,13 @@ Alle Daten bleiben lokal auf dem Gerät (IndexedDB). Es gibt keinen Server und k
   Texterkennung (Tesseract.js, läuft lokal) füllt Betrag, Datum und Händler vor
 - **PIN-Sperre**: Daten und Belege AES-256-GCM verschlüsselt (Schlüssel per PBKDF2 aus 6-stelliger PIN),
   automatisches Sperren im Hintergrund, verschlüsseltes Backup
-- **Übersicht** je Steuerjahr: Werbungskosten (Anlage N) und EÜR fürs Gewerbe
-- **Export**: CSV (Fahrten, Belege), Belegfotos, JSON-Backup inkl. Fotos
+- **Übersicht** je Steuerjahr: Werbungskosten (Anlage N) und EÜR fürs Gewerbe, Prüfhinweise vor der Abgabe
+- **Finanzamt-Details**: fortlaufende Belegnummern, Zahlungsart, Anschriften, Zuordnung zu Anlage N / EÜR,
+  Abschreibung (AfA) über 800 € netto bzw. 952 € brutto monatsgenau, Computer/Software sofort,
+  Kleinunternehmer oder Regelbesteuerung (USt/Vorsteuer), Verpflegungspauschale, Kontoführungspauschale,
+  Feiertage je Bundesland
+- **Export**: Steuerpaket (ZIP) mit PDF-Steuerbericht (Zusammenfassung, Fahrtenliste, Belegliste, alle Belege),
+  CSV-Dateien und Belegdateien; JSON-Backup inkl. Fotos
 
 ## Veröffentlichen mit GitHub Pages
 1. Auf github.com ein neues Repository `steuerfinn` anlegen (public, ohne README).
